@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Montserrat";
+  src: url("assets/fonts/montserrat.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 :root {
   --bg: #0b0b0c;
   --surface: #141416;
@@ -38,12 +45,11 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 }
 
 /* ---------- top bar ---------- */
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px 6px; }
-.brand { display: flex; align-items: center; gap: 10px; }
-.brand-logo { height: 30px; width: auto; display: block; filter: drop-shadow(0 1px 6px rgba(201,169,97,.18)); }
-.brand-text { font-size: 19px; font-weight: 300; letter-spacing: 3px; text-transform: uppercase; color: #f2f2f3; }
-.brand.logo-only .brand-text { display: none; }
-.brand.logo-only .brand-logo { height: 34px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px 6px; }
+.brand { display: flex; align-items: center; gap: 13px; }
+.brand-logo { height: 42px; width: auto; display: block; filter: drop-shadow(0 1px 6px rgba(201,169,97,.18)); }
+.brand-divider { width: 1px; height: 26px; background: linear-gradient(transparent, var(--gold), transparent); }
+.brand-text { font-family: "Montserrat", var(--font); font-size: 8.5px; font-weight: 500; letter-spacing: .6em; line-height: 1; text-transform: uppercase; color: #f2f2f3; }
 .top-actions { display: flex; gap: 4px; }
 .icon-btn { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; color: var(--muted); }
 .icon-btn:active { background: var(--surface-2); color: var(--text); }

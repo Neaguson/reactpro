@@ -1,0 +1,7 @@
+# Material de design e prévias locais (não vão para o site)
+branding/
+previews/
+tools/header-previews*.html
+# Só a fonte usada no app é publicada
+assets/fonts/*
+!assets/fonts/montserrat.woff2
