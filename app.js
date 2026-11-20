@@ -29,6 +29,7 @@ const DEFAULTS = {
   camZoom: 1, camX: 0, camY: 0,
   volVid: 100, volMic: 100, quality: '1080', format: 'mp4', fps: '60',
   watermark: false, wmOpacity: 16, autoClips: false, clipLen: '30',
+  pauseVidWithRec: true, headTip: true, duck: true, duckAmt: 50,
   fx: { ...FX_PRESETS.off },
 };
 
@@ -651,16 +652,19 @@ function ensureAudio() {
     const actx = new AC();
     const dest = actx.createMediaStreamDestination();
     const vidSrc = actx.createMediaElementSource(mainVideo);
+    const duck = actx.createGain();          // abaixa o vídeo enquanto você fala
     const vidGain = actx.createGain();
     const micGain = actx.createGain();
     const analyser = actx.createAnalyser();
     analyser.fftSize = 512;
-    vidSrc.connect(actx.destination);        // você ouve o vídeo
-    vidSrc.connect(vidGain).connect(dest);   // e ele entra na gravação
+    vidSrc.connect(duck);
+    duck.connect(actx.destination);          // você ouve o vídeo
+    duck.connect(vidGain).connect(dest);     // e ele entra na gravação
     micGain.connect(dest);                   // a voz só vai para a gravação (sem retorno)
-    state.audio = { ctx: actx, dest, vidGain, micGain, micNode: null, analyser };
+    state.audio = { ctx: actx, dest, duck, vidGain, micGain, micNode: null, analyser };
     applyVolumes();
     if (state.micStream) setMic(state.micStream);
+    setInterval(duckTick, 50);
   }
   if (state.audio.ctx.state !== 'running') state.audio.ctx.resume().catch(() => {});
   return state.audio;
@@ -675,6 +679,32 @@ function setMic(stream) {
     state.audio.micNode = state.audio.ctx.createMediaStreamSource(stream);
     state.audio.micNode.connect(state.audio.micGain);
     state.audio.micNode.connect(state.audio.analyser);
+  }
+}
+
+/* Abaixar o vídeo quando você fala: compara o nível do microfone com o
+   "ruído de fundo" (que se ajusta sozinho) e baixa o vídeo rápido ao falar,
+   devolvendo devagar quando você para. */
+const duckBuf = new Uint8Array(512);
+let duckFloor = 0.01, duckHold = 0, duckTarget = 1;
+function duckTick() {
+  const a = state.audio;
+  if (!a) return;
+  let target = 1;
+  const s = state.settings;
+  if (a.micNode && s.duck && s.volMic > 0 && !mainVideo.paused) {
+    a.analyser.getByteTimeDomainData(duckBuf);
+    let sum = 0;
+    for (let i = 0; i < duckBuf.length; i++) { const d = (duckBuf[i] - 128) / 128; sum += d * d; }
+    const rms = Math.sqrt(sum / duckBuf.length);
+    duckFloor = rms < duckFloor ? duckFloor * 0.85 + rms * 0.15 : duckFloor * 0.995 + rms * 0.005;
+    const now = performance.now();
+    if (rms > Math.max(0.025, duckFloor * 3)) duckHold = now + 450;
+    if (now < duckHold) target = 1 - s.duckAmt / 100;
+  }
+  if (target !== duckTarget) {
+    duckTarget = target;
+    a.duck.gain.setTargetAtTime(target, a.ctx.currentTime, target < 1 ? 0.06 : 0.35);
   }
 }
 
@@ -881,10 +911,14 @@ async function beginRec() {
       toast('Sem microfone: a gravação terá só o som do vídeo.');
     }
   }
-  if (!state.settings.countdown) return startRecNow(mime);
+  if (!state.settings.countdown) {
+    if (state.settings.headTip && !state.tipShown) { state.tipShown = true; toast('🎧 Dica: use fone de ouvido para não dar eco.', 3000); }
+    return startRecNow(mime);
+  }
 
   state.phase = 'countdown';
   refreshUi();
+  $('#cdTip').hidden = !state.settings.headTip;
   let n = 3;
   const num = $('#countdownNum');
   const show = () => { num.textContent = n; num.style.animation = 'none'; void num.offsetWidth; num.style.animation = ''; vibrate(15); };
@@ -968,11 +1002,16 @@ function togglePauseRec() {
     try { rec.pause(); } catch (e) { console.error(e); toast('Este celular não permite pausar a gravação.'); return; }
     state.recAccum += performance.now() - state.recSegStart;
     state.phase = 'paused';
+    // o vídeo para junto (opção), para não "andar" enquanto a gravação está pausada
+    state.vidWasPlaying = state.settings.pauseVidWithRec && !mainVideo.paused && !mainVideo.ended;
+    if (state.vidWasPlaying) mainVideo.pause();
     vibrate(20);
   } else if (state.phase === 'paused') {
     rec.resume();
     state.recSegStart = performance.now();
     state.phase = 'recording';
+    if (state.vidWasPlaying) mainVideo.play().catch(() => {});
+    state.vidWasPlaying = false;
     vibrate(20);
   }
   tickRec();
@@ -1586,6 +1625,12 @@ function initSettingsUi() {
   bindToggle('#sWatermark', 'watermark');
   bindRange('#sWmOpacity', 'wmOpacity', '#vWmOpacity', (v) => v + '%');
   bindToggle('#sAutoClips', 'autoClips');
+  bindToggle('#sPauseVid', 'pauseVidWithRec');
+  bindToggle('#sHeadTip', 'headTip');
+  const duckField = () => { $('#fieldDuck').hidden = !state.settings.duck; };
+  bindToggle('#sDuck', 'duck', duckField);
+  bindRange('#sDuckAmt', 'duckAmt', '#vDuckAmt', (v) => v + '%');
+  duckField();
   initFxUi();
   bindSeg('#segClipLen', 'clipLen', () => state.current && renderMoments());
   refreshLayoutFields();

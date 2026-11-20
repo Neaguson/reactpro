@@ -92,7 +92,7 @@
           </div>
         </div>
         <div class="rec-badge" id="recBadge" hidden><i></i><span id="recBadgeLabel"></span><span id="recBadgeTime">0:00</span></div>
-        <div class="countdown" id="countdown" hidden><span id="countdownNum">3</span><small>toque no REC para cancelar</small></div>
+        <div class="countdown" id="countdown" hidden><span id="countdownNum">3</span><small>toque no REC para cancelar</small><div class="tip" id="cdTip" hidden>🎧 Use fone de ouvido para não dar eco</div></div>
       </div>
     </div>
   </main>
@@ -224,7 +224,15 @@
       <label class="switch"><input type="checkbox" id="sCountdown"><i></i></label>
     </div>
     <div class="toggle-row">
-      <span>Marca d'água com o logo<br><span class="muted small">Logo quase transparente no canto superior dos vídeos gravados.</span></span>
+      <span>Pausar o vídeo junto com a gravação<br><span class="muted small">Ao apertar Pausar na barra, o vídeo para também; ao continuar, ele volta a tocar se estava tocando. Pausar só o vídeo continua não pausando a gravação.</span></span>
+      <label class="switch"><input type="checkbox" id="sPauseVid"><i></i></label>
+    </div>
+    <div class="toggle-row">
+      <span>Lembrar de usar fone<br><span class="muted small">Mostra um aviso ao começar a gravar: sem fone, o microfone pega o som do vídeo e dá eco.</span></span>
+      <label class="switch"><input type="checkbox" id="sHeadTip"><i></i></label>
+    </div>
+    <div class="toggle-row">
+      <span>Marca d'água com o logo<br><span class="muted small">Logo quase transparente no canto da câmera nos vídeos gravados.</span></span>
       <label class="switch"><input type="checkbox" id="sWatermark"><i></i></label>
     </div>
     <div class="field">
@@ -258,6 +266,14 @@
     <div class="field">
       <label for="sVolMic">Sua voz <span id="vVolMic"></span></label>
       <input type="range" id="sVolMic" min="0" max="200" step="5">
+    </div>
+    <div class="toggle-row">
+      <span>Abaixar o vídeo quando você fala<br><span class="muted small">O som do vídeo diminui sozinho enquanto você comenta e volta quando você para. Funciona melhor com fone.</span></span>
+      <label class="switch"><input type="checkbox" id="sDuck"><i></i></label>
+    </div>
+    <div class="field" id="fieldDuck">
+      <label for="sDuckAmt">Quanto abaixar <span id="vDuckAmt"></span></label>
+      <input type="range" id="sDuckAmt" min="20" max="90" step="5">
     </div>
 
     <h3>Qualidade</h3>
