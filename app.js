@@ -19,7 +19,12 @@ const DEFAULTS = {
   fit: 'contain', mirror: true, showBar: true, countdown: true,
   camZoom: 1, camX: 0, camY: 0,
   volVid: 100, volMic: 100, quality: '1080', format: 'mp4',
+  watermark: false, autoClips: false, clipLen: '30',
 };
+
+// logo usado na marca d'água
+const wmImg = new Image();
+wmImg.src = 'assets/logo-mk.svg';
 
 const state = {
   settings: { ...DEFAULTS },
@@ -369,7 +374,12 @@ function draw() {
 
   // câmera
   const camOn = !!(state.camStream && camVideo.videoWidth);
-  if (pip && !camOn && recActive()) return; // no modo canto, sem câmera não desenha caixa vazia
+  if (pip && !camOn && recActive()) { drawWatermark(); return; } // no modo canto, sem câmera não desenha caixa vazia
+  drawCameraPanel(cam, pip, camOn, tint);
+  drawWatermark();
+}
+
+function drawCameraPanel(cam, pip, camOn, tint) {
   const cr = pip ? 26 : RADIUS;
   if (pip) {
     ctx.save();
@@ -389,9 +399,24 @@ function draw() {
   roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, cr); ctx.stroke();
 }
 
+// Marca d'água: logo pequeno no canto superior (o lado livre, se a câmera estiver no canto direito)
+function drawWatermark() {
+  if (!state.settings.watermark || !wmImg.complete || !wmImg.naturalWidth) return;
+  const s = state.settings;
+  const h = 104, w = h * (wmImg.naturalWidth / wmImg.naturalHeight);
+  const m = PAD + 26;
+  const left = s.layout === 'pip' && s.pipCorner === 'tr';
+  const x = left ? m : W - m - w, y = m;
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 3;
+  ctx.drawImage(wmImg, x, y, w, h);
+  ctx.restore();
+}
+
 /* ---------------- medidor do microfone ---------------- */
 const meterBars = [...document.querySelectorAll('#micMeter i')];
-const meterBuf = new Uint8Array(512);
+const meterBuf = new Uint8Array(512); // = analyser.fftSize
 let meterLevel = 0, meterShown = -1;
 function updateMeter() {
   const an = state.audio?.analyser;
@@ -655,6 +680,7 @@ function onRecButton() {
 
 async function beginRec() {
   if (!state.videoReady) { toast('Carregue um vídeo primeiro.'); return; }
+  if (clipBusy) { toast('Aguarde os cortes terminarem antes de gravar de novo.'); return; }
   const mime = pickMime();
   if (mime === null || !canvas.captureStream) { toast('Este navegador não consegue gravar. Use o Chrome (Android) ou o Safari (iPhone) atualizados.'); return; }
   ensureAudio();
@@ -707,7 +733,7 @@ async function startRecNow(mime) {
   }
 
   const rid = Date.now().toString(36);
-  state.rec = { rid, created: Date.now(), type: (rec.mimeType || mime || 'video/webm').split(';')[0], marks: [], duration: 0 };
+  state.rec = { rid, created: Date.now(), type: (rec.mimeType || mime || 'video/webm').split(';')[0], marks: [], loud: [], duration: 0 };
   state.seq = 0;
   state.diskWarned = false;
   state.writeChain = DB.put('kv', { ...state.rec }, 'activeRec').catch(console.error);
@@ -795,8 +821,14 @@ async function finishRec() {
   try {
     await state.writeChain;
     const thumb = await makeThumb();
-    await assembleAndSave(meta, thumb, false);
-    toast('Gravação salva em Meus vídeos ✓');
+    const item = await assembleAndSave(meta, thumb, false);
+    const moments = allMoments(item);
+    if (state.settings.autoClips && moments.length) {
+      moments.forEach((m) => queueClip(item, m.t));
+      toast(`Gravação salva ✓ Gerando ${moments.length} corte${moments.length > 1 ? 's' : ''} automaticamente…`, 4000);
+    } else {
+      toast('Gravação salva em Meus vídeos ✓');
+    }
   } catch (e) {
     console.error(e);
     toast('Não foi possível salvar a gravação.', 4000);
@@ -815,6 +847,7 @@ async function assembleAndSave(meta, thumb, recovered) {
   const item = {
     id: meta.rid, created: meta.created, duration: meta.duration, type: blob.type,
     size: blob.size, blob, thumb, marks: meta.marks || [], name: recovered ? 'Gravação recuperada' : '',
+    suggestions: detectHighlights(meta.loud, meta.marks), clipsDone: [],
   };
   try {
     await DB.put('videos', item);
@@ -875,6 +908,57 @@ async function recoverInterrupted() {
 function tickRec() {
   const t = fmt(elapsedMs() / 1000);
   $('#recBadgeTime').textContent = t;
+  sampleLoudness();
+}
+
+/* ---------------- sugestão de momentos (picos da sua voz) ---------------- */
+const loudBuf = new Uint8Array(512); // mesmo tamanho do analisador (fftSize)
+function sampleLoudness() {
+  const a = state.audio;
+  if (state.phase !== 'recording' || !state.rec || !a?.micNode) return;
+  a.analyser.getByteTimeDomainData(loudBuf);
+  let sum = 0;
+  for (let i = 0; i < loudBuf.length; i++) { const d = (loudBuf[i] - 128) / 128; sum += d * d; }
+  const rms = Math.sqrt(sum / loudBuf.length);
+  state.rec.loud.push([Math.round(elapsedMs() / 100) / 10, Math.round(rms * 10000) / 10000]);
+}
+
+// Procura os trechos em que a voz ficou bem mais alta que o normal (risada, grito, empolgação).
+function detectHighlights(samples, marks, max = 5) {
+  if (!samples || samples.length < 40) return [];
+  const secs = [];
+  for (const [t, v] of samples) {
+    const i = Math.floor(t);
+    (secs[i] ||= []).push(v);
+  }
+  const avg = [];
+  for (let i = 0; i < secs.length; i++) avg[i] = secs[i] ? secs[i].reduce((a, b) => a + b, 0) / secs[i].length : 0;
+  // média móvel de 3 segundos
+  const sm = avg.map((_, i) => {
+    let s = 0, n = 0;
+    for (let k = i - 1; k <= i + 1; k++) if (k >= 0 && k < avg.length) { s += avg[k]; n++; }
+    return s / n;
+  });
+  const sorted = [...sm].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p85 = sorted[Math.floor(sorted.length * 0.85)];
+  const thr = Math.max(median * 2, p85, 0.02);
+  const cands = [];
+  for (let i = 0; i < sm.length; i++) {
+    if (sm[i] < thr) continue;
+    let isPeak = true;
+    for (let k = Math.max(0, i - 4); k <= Math.min(sm.length - 1, i + 4); k++) if (sm[k] > sm[i]) { isPeak = false; break; }
+    if (isPeak) cands.push({ t: i, score: sm[i] / thr });
+  }
+  cands.sort((a, b) => b.score - a.score);
+  const picked = [];
+  for (const c of cands) {
+    if (picked.length >= max) break;
+    if (picked.some((p) => Math.abs(p.t - c.t) < 12)) continue;
+    if ((marks || []).some((m) => Math.abs(m - c.t) < 10)) continue; // já existe uma marcação sua ali
+    picked.push({ t: c.t, score: Math.round(c.score * 100) / 100 });
+  }
+  return picked.sort((a, b) => a.t - b.t);
 }
 
 /* ---------------- UI geral ---------------- */
@@ -944,10 +1028,10 @@ async function renderLibrary() {
     b.className = 'card';
     const url = it.thumb ? URL.createObjectURL(it.thumb) : '';
     if (url) thumbUrls.push(url);
-    const marks = it.marks?.length || 0;
+    const marks = (it.marks?.length || 0) + (it.suggestions?.length || 0);
     const title = it.name ? esc(it.name) : dateLabel(it.created);
     const sub = (it.name ? dateLabel(it.created) + ' · ' : '') + fmtBytes(it.size);
-    b.innerHTML = `<div class="thumb" style="${url ? `background-image:url('${url}')` : ''}"><span class="dur">${fmt(it.duration)}</span></div>
+    b.innerHTML = `<div class="thumb" style="${url ? `background-image:url('${url}')` : ''}">${it.clipOf ? '<span class="tag">Corte</span>' : ''}<span class="dur">${fmt(it.duration)}</span></div>
       <div class="meta"><b>${title}</b>${sub}${marks ? `<br><span class="marks-n">⚑ ${marks} momento${marks > 1 ? 's' : ''}</span>` : ''}</div>`;
     b.onclick = () => openPlayer(it);
     grid.appendChild(b);
@@ -968,17 +1052,186 @@ function openPlayer(it) {
   $('#playerTitle').textContent = dateLabel(it.created);
   $('#playerName').value = it.name || '';
   $('#playerMeta').textContent = `${fmt(it.duration)} · ${fmtBytes(it.size)} · ${it.type.includes('mp4') ? 'MP4' : 'WebM'}`;
-  const marks = it.marks || [];
-  $('#playerMarks').hidden = !marks.length;
-  const chips = $('#playerChips');
-  chips.innerHTML = '';
-  marks.forEach((t) => {
-    const c = document.createElement('button');
-    c.textContent = '⚑ ' + fmt(t);
-    c.onclick = () => { v.currentTime = Math.max(0, t - 2); v.play().catch(() => {}); };
-    chips.appendChild(c);
-  });
+  renderMoments();
   openSheet('#playerSheet');
+}
+
+/* ---------------- momentos e cortes ---------------- */
+function allMoments(it) {
+  const list = [
+    ...(it.marks || []).map((t) => ({ t, kind: 'mark' })),
+    ...(it.suggestions || []).map((s) => ({ t: s.t, kind: 'auto' })),
+  ];
+  return list.sort((a, b) => a.t - b.t);
+}
+const clipKey = (t) => Math.round(t * 10);
+const isClipped = (it, t) => (it.clipsDone || []).includes(clipKey(t));
+const isQueued = (it, t) => clipQueue.some((j) => j.item.id === it.id && clipKey(j.t) === clipKey(t));
+
+function renderMoments() {
+  const it = state.current;
+  const box = $('#playerMarks');
+  if (!it || it.clipOf) { box.hidden = true; return; }
+  const list = allMoments(it);
+  box.hidden = !list.length;
+  const wrap = $('#playerChips');
+  wrap.innerHTML = '';
+  const v = $('#playerVideo');
+  for (const m of list) {
+    const row = document.createElement('div');
+    row.className = 'moment ' + m.kind;
+    const jump = document.createElement('button');
+    jump.className = 'jump';
+    jump.innerHTML = `<b>${m.kind === 'mark' ? '⚑' : '✦'} ${fmt(m.t)}</b><span>${m.kind === 'mark' ? 'sua marcação' : 'sugestão automática'}</span>`;
+    jump.onclick = () => { v.currentTime = Math.max(0, m.t - 2); v.play().catch(() => {}); };
+    const act = document.createElement('button');
+    act.className = 'clip-btn';
+    if (isClipped(it, m.t)) { act.textContent = '✓ Corte pronto'; act.disabled = true; }
+    else if (isQueued(it, m.t)) { act.textContent = 'Na fila…'; act.disabled = true; }
+    else { act.textContent = 'Gerar corte'; act.onclick = () => { queueClip(it, m.t); renderMoments(); }; }
+    row.append(jump, act);
+    wrap.appendChild(row);
+  }
+  const pending = list.filter((m) => !isClipped(it, m.t) && !isQueued(it, m.t));
+  $('#btnAllClips').hidden = pending.length < 2;
+  $('#clipLenInfo').textContent = `Cada corte terá ${state.settings.clipLen}s (muda em Configurações).`;
+}
+
+$('#btnAllClips').addEventListener('click', () => {
+  const it = state.current; if (!it) return;
+  allMoments(it).filter((m) => !isClipped(it, m.t) && !isQueued(it, m.t)).forEach((m) => queueClip(it, m.t));
+  renderMoments();
+});
+
+const clipQueue = [];
+let clipBusy = false, clipProgress = 0, clipDoneCount = 0;
+
+function queueClip(item, t) {
+  if (isQueued(item, t)) return;
+  clipQueue.push({ item, t });
+  updateClipStatus();
+  runClips();
+}
+
+function updateClipStatus() {
+  const total = clipQueue.length + clipDoneCount;
+  const txt = clipQueue.length
+    ? `Gerando cortes: ${clipDoneCount + 1} de ${total} · ${Math.round(clipProgress * 100)}%`
+    : '';
+  for (const id of ['#clipStatusP', '#clipStatusL']) {
+    const el = $(id);
+    el.hidden = !txt;
+    el.textContent = txt;
+  }
+}
+
+async function runClips() {
+  if (clipBusy) return;
+  clipBusy = true;
+  clipDoneCount = 0;
+  let ok = 0;
+  while (clipQueue.length) {
+    const job = clipQueue[0];
+    clipProgress = 0;
+    updateClipStatus();
+    try { await makeClip(job); ok++; }
+    catch (e) { console.error(e); toast('Não foi possível gerar um dos cortes.'); }
+    clipQueue.shift();
+    clipDoneCount++;
+    if (state.current && state.current.id === job.item.id) renderMoments();
+    renderLibrary();
+  }
+  clipBusy = false;
+  clipDoneCount = 0;
+  updateClipStatus();
+  if (ok) toast(`${ok} corte${ok > 1 ? 's' : ''} pronto${ok > 1 ? 's' : ''} em Meus vídeos ✓`, 3500);
+}
+
+// Toca o trecho da gravação "por trás", sem som, e grava de novo só aquele pedaço.
+// Leva mais ou menos o tempo do próprio corte.
+async function makeClip({ item, t }) {
+  const len = Number(state.settings.clipLen) || 30;
+  const total = item.duration || 0;
+  let start = Math.max(0, t - Math.round(len / 3));
+  let end = Math.min(total || start + len, start + len);
+  if (end - start < len && total > len) start = Math.max(0, end - len);
+  if (end - start < 1) throw new Error('trecho curto demais');
+
+  const v = document.createElement('video');
+  v.className = 'src-media';
+  v.playsInline = true;
+  v.preload = 'auto';
+  const url = URL.createObjectURL(item.blob);
+  v.src = url;
+  document.body.appendChild(v);
+  const cleanup = [];
+  cleanup.push(() => { v.pause(); v.remove(); URL.revokeObjectURL(url); });
+  try {
+    await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error('não abriu')); });
+    v.currentTime = start;
+    await new Promise((res) => { v.onseeked = res; setTimeout(res, 4000); });
+
+    const a = ensureAudio();
+    const src = a.ctx.createMediaElementSource(v);
+    const dest = a.ctx.createMediaStreamDestination();
+    src.connect(dest); // só para o corte, você não ouve nada
+    cleanup.push(() => src.disconnect());
+
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth || 1080; c.height = v.videoHeight || 1920;
+    const cx = c.getContext('2d', { alpha: false });
+    cx.drawImage(v, 0, 0, c.width, c.height);
+    const vs = c.captureStream(30);
+    cleanup.push(() => vs.getTracks().forEach((tr) => tr.stop()));
+    const stream = new MediaStream([...vs.getVideoTracks(), ...dest.stream.getAudioTracks()]);
+    const mime = pickMime();
+    const opts = { videoBitsPerSecond: c.width >= 1080 ? 9_000_000 : 5_000_000, audioBitsPerSecond: 160_000 };
+    if (mime) opts.mimeType = mime;
+    const rec = new MediaRecorder(stream, opts);
+    const parts = [];
+    rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+
+    let running = true;
+    const drawFrame = () => {
+      if (!running) return;
+      cx.drawImage(v, 0, 0, c.width, c.height);
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(drawFrame);
+      else setTimeout(drawFrame, 33);
+    };
+    rec.start(1000);
+    await v.play();
+    drawFrame();
+    await new Promise((res) => {
+      const chk = setInterval(() => {
+        clipProgress = clamp((v.currentTime - start) / (end - start), 0, 1);
+        updateClipStatus();
+        if (v.currentTime >= end - 0.04 || v.ended || v.paused) { clearInterval(chk); res(); }
+      }, 100);
+    });
+    running = false;
+    v.pause();
+    await new Promise((res) => { rec.onstop = res; rec.stop(); });
+
+    const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+    const blob = new Blob(parts, { type });
+    if (!blob.size) throw new Error('corte vazio');
+    const thumb = await new Promise((res) => {
+      const tc = document.createElement('canvas'); tc.width = 270; tc.height = 480;
+      tc.getContext('2d').drawImage(c, 0, 0, 270, 480);
+      tc.toBlob(res, 'image/jpeg', 0.75);
+    });
+    const clip = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      created: Date.now(), duration: end - start, type, size: blob.size, blob, thumb,
+      marks: [], suggestions: [], clipsDone: [],
+      name: `Corte ${fmt(t)}${item.name ? ' · ' + item.name : ''}`, clipOf: item.id,
+    };
+    await DB.put('videos', clip);
+    item.clipsDone = [...(item.clipsDone || []), clipKey(t)];
+    await DB.put('videos', item);
+  } finally {
+    cleanup.reverse().forEach((f) => { try { f(); } catch {} });
+  }
 }
 
 async function saveName() {
@@ -1088,6 +1341,9 @@ function initSettingsUi() {
   bindToggle('#sMirror', 'mirror');
   bindToggle('#sBar', 'showBar', positionOverlays);
   bindToggle('#sCountdown', 'countdown');
+  bindToggle('#sWatermark', 'watermark');
+  bindToggle('#sAutoClips', 'autoClips');
+  bindSeg('#segClipLen', 'clipLen', () => state.current && renderMoments());
   refreshLayoutFields();
 
   $('#btnFrameReset').addEventListener('click', () => {
