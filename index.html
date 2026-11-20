@@ -46,6 +46,11 @@
           <button class="mini" id="btnCamOff" aria-label="Desligar câmera" hidden>
             <svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M8 6h7.5L17 8h2a2 2 0 0 1 2 2v7M18 19H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/></svg>
           </button>
+          <div class="meter" id="micMeter" hidden aria-label="Nível do microfone">
+            <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="frame-hint" id="frameHint" hidden>Arraste para posicionar · dois dedos para zoom</div>
         </div>
         <div class="ov ov-vid" id="ovVid">
           <label class="pill" id="btnLoadInStage">
@@ -57,8 +62,11 @@
             <input type="file" id="fileInput" accept="video/*" hidden>
             <svg viewBox="0 0 24 24"><path d="M4 9h13l-3.5-3.5M20 15H7l3.5 3.5"/></svg>
           </label>
+          <div class="seek-flash left" id="flashL">−10s</div>
+          <div class="seek-flash right" id="flashR">+10s</div>
         </div>
-        <div class="rec-badge" id="recBadge" hidden><i></i><span id="recBadgeTime">00:00</span></div>
+        <div class="rec-badge" id="recBadge" hidden><i></i><span id="recBadgeLabel"></span><span id="recBadgeTime">0:00</span></div>
+        <div class="countdown" id="countdown" hidden><span id="countdownNum">3</span><small>toque no REC para cancelar</small></div>
       </div>
     </div>
 
@@ -69,7 +77,19 @@
         <span class="t" id="tDur">0:00</span>
       </div>
       <div class="ctrl-row">
-        <div class="ctrl-side"><span class="hint" id="recHint">Carregue um vídeo para gravar</span></div>
+        <div class="ctrl-side">
+          <span class="hint" id="recHint">Carregue um vídeo para gravar</span>
+          <div class="rec-tools" id="recTools" hidden>
+            <button class="tool" id="btnRecPause" aria-label="Pausar gravação">
+              <svg viewBox="0 0 24 24" class="i-rp"><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/></svg>
+              <svg viewBox="0 0 24 24" class="i-rr" hidden><circle cx="12" cy="12" r="6.5" fill="#e5484d" stroke="none"/></svg>
+            </button>
+            <button class="tool" id="btnMark" aria-label="Marcar momento">
+              <svg viewBox="0 0 24 24"><path d="M6 21V4h11l-2 4 2 4H6"/></svg>
+              <b id="markCount" hidden>0</b>
+            </button>
+          </div>
+        </div>
         <div class="ctrl-center">
           <button class="ctl" id="btnBack" aria-label="Voltar 10 segundos" disabled>
             <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
@@ -151,9 +171,33 @@
     </div>
 
     <h3>Layout</h3>
-    <div class="field">
+    <div class="layouts" id="segLayout">
+      <button data-v="stack"><i class="lp"><b class="c"></b><b class="v"></b></i>Câmera em cima</button>
+      <button data-v="stackInv"><i class="lp"><b class="v"></b><b class="c"></b></i>Vídeo em cima</button>
+      <button data-v="pip"><i class="lp pip"><b class="v"></b><b class="c"></b></i>Câmera no canto</button>
+    </div>
+    <div class="field" id="fieldSplit">
       <label for="sSplit">Tamanho da câmera <span id="vSplit"></span></label>
       <input type="range" id="sSplit" min="30" max="60" step="1">
+    </div>
+    <div id="fieldPip">
+      <div class="field">
+        <label for="sPipSize">Tamanho da câmera <span id="vPipSize"></span></label>
+        <input type="range" id="sPipSize" min="25" max="50" step="1">
+      </div>
+      <div class="field">
+        <label>Canto da câmera</label>
+        <div class="seg" id="segCorner">
+          <button data-v="tl">↖ Sup. esq.</button>
+          <button data-v="tr">↗ Sup. dir.</button>
+          <button data-v="bl">↙ Inf. esq.</button>
+          <button data-v="br">↘ Inf. dir.</button>
+        </div>
+      </div>
+    </div>
+    <div class="toggle-row">
+      <span>Enquadramento do rosto<br><span class="muted small">Arraste a câmera para posicionar e use dois dedos para zoom.</span></span>
+      <button class="btn small-btn" id="btnFrameReset">Centralizar</button>
     </div>
     <div class="field">
       <label>Vídeo no quadro</label>
@@ -169,6 +213,12 @@
     <div class="toggle-row">
       <span>Mostrar barra de tempo do vídeo na gravação</span>
       <label class="switch"><input type="checkbox" id="sBar"><i></i></label>
+    </div>
+
+    <h3>Gravação</h3>
+    <div class="toggle-row">
+      <span>Contagem 3, 2, 1 antes de gravar</span>
+      <label class="switch"><input type="checkbox" id="sCountdown"><i></i></label>
     </div>
 
     <h3>Áudio da gravação</h3>
@@ -187,6 +237,13 @@
       <button data-v="720">720p (mais leve)</button>
     </div>
     <p class="muted small">Se o celular esquentar ou travar durante a gravação, use 720p.</p>
+
+    <h3>Formato do arquivo</h3>
+    <div class="seg" id="segFormat">
+      <button data-v="mp4">MP4 (para postar)</button>
+      <button data-v="webm">WebM (protege)</button>
+    </div>
+    <p class="muted small"><b>MP4</b> abre em qualquer editor, galeria e rede social, mas no Android o arquivo só é salvo no final: se o app fechar no meio, a gravação se perde. <b>WebM</b> vai sendo salvo a cada segundo e é recuperado se o app fechar, mas alguns editores e redes sociais não aceitam esse formato.</p>
   </section>
 </div>
 
@@ -199,17 +256,25 @@
     </div>
     <ol class="steps">
       <li>Toque em <b>Ativar câmera</b> e permita câmera e microfone.</li>
-      <li>Toque em <b>Carregar vídeo do celular</b> e escolha o vídeo da galeria.</li>
-      <li>Toque no botão <b>REC</b> (círculo vermelho) para começar a gravar.</li>
+      <li>Toque em <b>Carregar vídeo</b> (dentro do quadro) e escolha o vídeo da galeria.</li>
+      <li>Toque no botão <b>REC</b> (círculo vermelho). Depois da contagem 3, 2, 1 a gravação começa.</li>
       <li>Dê play, pause, volte ou avance o vídeo e reaja à vontade. Tudo entra na gravação.</li>
       <li>Toque no <b>REC</b> de novo para terminar. O vídeo vai para <b>Meus vídeos</b>.</li>
     </ol>
+    <h3>Durante a gravação</h3>
+    <ul class="steps">
+      <li><b>Pausar gravação</b> (botão à esquerda): para de gravar sem criar outro arquivo. Toque de novo para continuar.</li>
+      <li><b>Marcar momento</b> (bandeirinha): toque quando acontecer algo bom. Em Meus vídeos aparece a lista desses momentos para facilitar os cortes.</li>
+      <li>No vídeo: <b>um toque</b> dá play/pausa; <b>dois toques</b> no lado direito avançam 10s e no esquerdo voltam 10s.</li>
+      <li>Na câmera: <b>arraste</b> para posicionar o rosto e use <b>dois dedos</b> para zoom. Dois toques na câmera voltam ao normal.</li>
+      <li>A barrinha ao lado do microfone mostra se a sua voz está sendo captada.</li>
+    </ul>
     <h3>O que aparece no vídeo gravado</h3>
     <p>Só o fundo, a câmera, o vídeo e (se ativada) a barra de tempo. Nome do app, botões, menus e toques não aparecem.</p>
     <h3>Dicas</h3>
     <ul class="steps">
       <li><b>Use fone de ouvido.</b> Sem fone, o microfone pega o som do alto-falante e dá eco.</li>
-      <li>Não saia do app nem bloqueie a tela enquanto grava: a gravação congela.</li>
+      <li>Não saia do app nem bloqueie a tela enquanto grava: a gravação congela. Se o app fechar no meio, o que já foi gravado é recuperado na próxima vez que você abrir (no Android, só com o formato WebM, em Configurações).</li>
       <li>Para o fundo temático (ex.: GTA), vá em Configurações › Fundo.</li>
     </ul>
   </section>
@@ -222,8 +287,13 @@
       <h2 id="playerTitle">Gravação</h2>
       <button class="icon-btn" data-close aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </div>
+    <input class="name-input" id="playerName" type="text" maxlength="60" placeholder="Dar um nome (ex.: React trailer GTA 6)">
     <video id="playerVideo" playsinline controls></video>
     <p class="muted small" id="playerMeta"></p>
+    <div class="marks" id="playerMarks" hidden>
+      <span class="muted small">Momentos marcados (toque para ir até lá):</span>
+      <div class="chips" id="playerChips"></div>
+    </div>
     <div class="player-actions">
       <button class="btn gold" id="pShare">Salvar na galeria</button>
       <button class="btn" id="pDownload">Baixar arquivo</button>

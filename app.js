@@ -5,6 +5,8 @@
    O vídeo final é montado num <canvas> (fundo + câmera + vídeo)
    e gravado com MediaRecorder. Botões e menus ficam fora do canvas,
    por isso não aparecem na gravação.
+   A gravação é salva em partes no IndexedDB enquanto acontece, para
+   ser recuperada se o app fechar no meio.
    ========================================================= */
 
 const $ = (s) => document.querySelector(s);
@@ -12,8 +14,11 @@ const W = 1080, H = 1920;            // coordenadas lógicas do quadro (9:16)
 const PAD = 44, GAP = 28, RADIUS = 34;
 
 const DEFAULTS = {
-  blur: 14, dim: 35, split: 45, fit: 'contain', mirror: true, showBar: true,
-  volVid: 100, volMic: 100, quality: '1080',
+  blur: 14, dim: 35,
+  layout: 'stack', split: 45, pipSize: 38, pipCorner: 'tr',
+  fit: 'contain', mirror: true, showBar: true, countdown: true,
+  camZoom: 1, camX: 0, camY: 0,
+  volVid: 100, volMic: 100, quality: '1080', format: 'mp4',
 };
 
 const state = {
@@ -22,15 +27,23 @@ const state = {
   micStream: null,
   videoUrl: null,
   videoReady: false,
-  bgBitmap: null,       // imagem original do fundo
-  bgCanvas: null,       // fundo já desfocado/escurecido no tamanho do quadro
+  bgBitmap: null,
+  bgCanvas: null,
+  // gravação: 'idle' | 'countdown' | 'recording' | 'paused' | 'saving'
+  phase: 'idle',
   recorder: null,
-  chunks: [],
-  recStart: 0,
+  vStream: null,
+  rec: null,            // { rid, created, type, marks, duration }
+  seq: 0,
+  recAccum: 0,
+  recSegStart: 0,
   recTimer: null,
+  countdownT: null,
+  writeChain: Promise.resolve(),
+  diskWarned: false,
   wakeLock: null,
-  audio: null,          // { ctx, dest, vidGain, micGain, micNode }
-  current: null,        // gravação aberta no player
+  audio: null,          // { ctx, dest, vidGain, micGain, micNode, analyser }
+  current: null,
 };
 
 const canvas = $('#canvas');
@@ -44,11 +57,12 @@ const DB = (() => {
   function open() {
     if (dbp) return dbp;
     dbp = new Promise((res, rej) => {
-      const r = indexedDB.open('reactpro', 1);
+      const r = indexedDB.open('reactpro', 2);
       r.onupgradeneeded = () => {
         const db = r.result;
-        db.createObjectStore('videos', { keyPath: 'id' });
-        db.createObjectStore('kv');
+        if (!db.objectStoreNames.contains('videos')) db.createObjectStore('videos', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+        if (!db.objectStoreNames.contains('chunks')) db.createObjectStore('chunks', { keyPath: 'k' });
       };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
@@ -59,18 +73,20 @@ const DB = (() => {
     const db = await open();
     return new Promise((res, rej) => {
       const t = db.transaction(store, mode);
-      const s = t.objectStore(store);
-      const out = fn(s);
+      const out = fn(t.objectStore(store));
       t.oncomplete = () => res(out && 'result' in out ? out.result : out);
       t.onerror = () => rej(t.error);
       t.onabort = () => rej(t.error);
     });
   }
+  const range = (rid) => IDBKeyRange.bound(rid + ':', rid + ':￿');
   return {
     get: (store, key) => tx(store, 'readonly', (s) => s.get(key)),
     put: (store, val, key) => tx(store, 'readwrite', (s) => (key === undefined ? s.put(val) : s.put(val, key))),
     del: (store, key) => tx(store, 'readwrite', (s) => s.delete(key)),
     all: (store) => tx(store, 'readonly', (s) => s.getAll()),
+    chunks: (rid) => tx('chunks', 'readonly', (s) => s.getAll(range(rid))),
+    delChunks: (rid) => tx('chunks', 'readwrite', (s) => s.delete(range(rid))),
   };
 })();
 
@@ -84,6 +100,8 @@ function fmtBytes(b) {
   if (b > 1e9) return (b / 1e9).toFixed(1).replace('.', ',') + ' GB';
   return Math.max(0.1, b / 1e6).toFixed(1).replace('.', ',') + ' MB';
 }
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const vibrate = (ms) => { try { navigator.vibrate?.(ms); } catch {} };
 let toastT;
 function toast(msg, ms = 2600) {
   const t = $('#toast');
@@ -103,14 +121,32 @@ function roundRectPath(c, x, y, w, h, r) {
   c.arcTo(x, y, x + w, y, r);
   c.closePath();
 }
+const busy = () => state.phase !== 'idle';
+const recActive = () => state.phase === 'recording' || state.phase === 'paused';
 
 /* ---------------- layout do quadro ---------------- */
 function layout() {
-  const inner = H - PAD * 2 - GAP;
-  const camH = Math.round(inner * (state.settings.split / 100));
-  const cam = { x: PAD, y: PAD, w: W - PAD * 2, h: camH };
-  const vid = { x: PAD, y: PAD + camH + GAP, w: W - PAD * 2, h: inner - camH };
-  return { cam, vid };
+  const s = state.settings;
+  const iw = W - PAD * 2, ih = H - PAD * 2;
+  if (s.layout === 'pip') {
+    const vid = { x: PAD, y: PAD, w: iw, h: ih };
+    const cw = Math.round(W * s.pipSize / 100), ch = Math.round(cw * 4 / 3);
+    const m = PAD + 28;
+    const right = s.pipCorner.includes('r'), bottom = s.pipCorner.includes('b');
+    const cam = {
+      x: right ? W - m - cw : m,
+      y: bottom ? H - m - ch - (s.showBar ? 110 : 0) : m,
+      w: cw, h: ch,
+    };
+    return { cam, vid, pip: true };
+  }
+  const inner = ih - GAP;
+  const camH = Math.round(inner * (s.split / 100));
+  const vidH = inner - camH;
+  if (s.layout === 'stackInv') {
+    return { vid: { x: PAD, y: PAD, w: iw, h: vidH }, cam: { x: PAD, y: PAD + vidH + GAP, w: iw, h: camH }, pip: false };
+  }
+  return { cam: { x: PAD, y: PAD, w: iw, h: camH }, vid: { x: PAD, y: PAD + camH + GAP, w: iw, h: vidH }, pip: false };
 }
 
 function outputSize() {
@@ -127,6 +163,7 @@ function applyCanvasSize() {
 function fitStage() {
   const wrap = $('#stageWrap');
   const aw = wrap.clientWidth, ah = wrap.clientHeight;
+  if (!aw || !ah) return;
   let w = aw, h = (aw * 16) / 9;
   if (h > ah) { h = ah; w = (ah * 9) / 16; }
   const st = $('#stage');
@@ -140,7 +177,7 @@ function positionOverlays() {
     el.style.top = (r.y / H) * 100 + '%';
     el.style.height = (r.h / H) * 100 + '%';
     el.style.left = (r.x / W) * 100 + '%';
-    el.style.right = (r.x / W) * 100 + '%';
+    el.style.width = (r.w / W) * 100 + '%';
   };
   set($('#ovCam'), cam);
   set($('#ovVid'), vid);
@@ -182,7 +219,7 @@ function buildBackground() {
       drawCover(b, img, iw, ih, 0, 0, ow, oh);
     } else if (canvasFilterSupported) {
       b.filter = `blur(${blur}px)`;
-      const m = blur * 2; // margem para não escurecer as bordas
+      const m = blur * 2;
       drawCover(b, img, iw, ih, -m, -m, ow + m * 2, oh + m * 2);
       b.filter = 'none';
     } else {
@@ -219,7 +256,6 @@ async function loadBgBlob(blob) {
     const img = new Image();
     img.src = url;
     await img.decode();
-    // reduz para no máximo 1600px no lado maior (economiza memória)
     const max = 1600, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
     const c = document.createElement('canvas');
     c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
@@ -241,25 +277,38 @@ function updateBgDom(dataUrl) {
 }
 
 /* ---------------- desenho do quadro ---------------- */
-function drawMedia(src, sw, sh, r, mode, mirror) {
-  const s = mode === 'cover' ? Math.max(r.w / sw, r.h / sh) : Math.min(r.w / sw, r.h / sh);
-  const dw = sw * s, dh = sh * s;
-  const dx = r.x + (r.w - dw) / 2, dy = r.y + (r.h - dh) / 2;
-  if (mirror) {
+function camOverflow(r) {
+  const sw = camVideo.videoWidth, sh = camVideo.videoHeight;
+  if (!sw || !sh) return { sc: 1, mx: 0, my: 0, dw: 0, dh: 0 };
+  const sc = Math.max(r.w / sw, r.h / sh) * state.settings.camZoom;
+  const dw = sw * sc, dh = sh * sc;
+  return { sc, dw, dh, mx: (dw - r.w) / 2, my: (dh - r.h) / 2 };
+}
+
+function drawCamera(r) {
+  const s = state.settings;
+  const { dw, dh, mx, my } = camOverflow(r);
+  if (!dw) return;
+  // com espelho, o deslocamento é invertido para acompanhar o dedo na tela
+  const ox = (s.mirror ? -s.camX : s.camX) * mx;
+  const oy = s.camY * my;
+  const dx = r.x + (r.w - dw) / 2 + ox, dy = r.y + (r.h - dh) / 2 + oy;
+  if (s.mirror) {
     ctx.save();
     ctx.translate(2 * (r.x + r.w / 2), 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(src, dx, dy, dw, dh);
+    ctx.drawImage(camVideo, dx, dy, dw, dh);
     ctx.restore();
   } else {
-    ctx.drawImage(src, dx, dy, dw, dh);
+    ctx.drawImage(camVideo, dx, dy, dw, dh);
   }
 }
 
-function panel(r, fill) {
-  roundRectPath(ctx, r.x, r.y, r.w, r.h, RADIUS);
-  ctx.fillStyle = fill;
-  ctx.fill();
+function drawVideo(r) {
+  const sw = mainVideo.videoWidth, sh = mainVideo.videoHeight;
+  const s = state.settings.fit === 'cover' ? Math.max(r.w / sw, r.h / sh) : Math.min(r.w / sw, r.h / sh);
+  const dw = sw * s, dh = sh * s;
+  ctx.drawImage(mainVideo, r.x + (r.w - dw) / 2, r.y + (r.h - dh) / 2, dw, dh);
 }
 
 function drawProgress(r) {
@@ -274,7 +323,6 @@ function drawProgress(r) {
   ctx.fillRect(r.x, y0, r.w, h);
 
   const bx = r.x + 34, bw = r.w - 68, by = r.y + r.h - 30;
-  // ícone play/pause
   ctx.fillStyle = '#fff';
   const ix = bx, iy = by - 40;
   if (v.paused) {
@@ -286,7 +334,6 @@ function drawProgress(r) {
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillStyle = 'rgba(255,255,255,0.92)';
   ctx.fillText(`${fmt(cur)} / ${fmt(dur)}`, ix + 40, iy + 1);
-  // barra
   ctx.fillStyle = 'rgba(255,255,255,0.25)';
   roundRectPath(ctx, bx, by - 3, bw, 6, 3); ctx.fill();
   const p = dur ? Math.min(1, cur / dur) : 0;
@@ -300,43 +347,80 @@ function draw() {
   else { ctx.fillStyle = '#0b0b0c'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
   ctx.setTransform(sc, 0, 0, sc, 0, 0);
 
-  const { cam, vid } = layout();
-  const translucent = state.bgBitmap ? 'rgba(14,14,16,0.55)' : 'rgba(22,22,25,1)';
+  const { cam, vid, pip } = layout();
+  const hasBg = !!state.bgBitmap;
+  const tint = hasBg ? 'rgba(14,14,16,0.55)' : 'rgba(22,22,25,1)';
 
-  // câmera
+  // vídeo (no modo canto ele fica por baixo da câmera)
   ctx.save();
-  panel(cam, translucent);
-  ctx.clip();
-  if (state.camStream && camVideo.videoWidth) {
-    drawMedia(camVideo, camVideo.videoWidth, camVideo.videoHeight, cam, 'cover', state.settings.mirror);
-  }
-  ctx.restore();
-
-  // vídeo
-  ctx.save();
-  panel(vid, state.videoReady ? 'rgba(0,0,0,0.78)' : translucent);
+  roundRectPath(ctx, vid.x, vid.y, vid.w, vid.h, RADIUS);
+  ctx.fillStyle = !state.videoReady ? tint
+    : (hasBg && state.settings.fit === 'contain' ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.88)');
+  ctx.fill();
   ctx.clip();
   if (state.videoReady && mainVideo.videoWidth) {
-    drawMedia(mainVideo, mainVideo.videoWidth, mainVideo.videoHeight, vid, state.settings.fit, false);
+    drawVideo(vid);
     if (state.settings.showBar) drawProgress(vid);
   }
   ctx.restore();
-
-  // contorno sutil
   ctx.lineWidth = 2;
   ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, RADIUS); ctx.stroke();
   roundRectPath(ctx, vid.x, vid.y, vid.w, vid.h, RADIUS); ctx.stroke();
+
+  // câmera
+  const camOn = !!(state.camStream && camVideo.videoWidth);
+  if (pip && !camOn && recActive()) return; // no modo canto, sem câmera não desenha caixa vazia
+  const cr = pip ? 26 : RADIUS;
+  if (pip) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 36; ctx.shadowOffsetY = 8;
+    roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, cr);
+    ctx.fillStyle = '#16161a'; ctx.fill();
+    ctx.restore();
+  }
+  ctx.save();
+  roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, cr);
+  if (!pip) { ctx.fillStyle = tint; ctx.fill(); }
+  ctx.clip();
+  if (camOn) drawCamera(cam);
+  ctx.restore();
+  ctx.lineWidth = pip ? 3 : 2;
+  ctx.strokeStyle = pip ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)';
+  roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, cr); ctx.stroke();
 }
 
-// Mantém o desenho rodando mesmo se a aba estiver em segundo plano por instantes.
-function loop() { draw(); requestAnimationFrame(loop); }
+/* ---------------- medidor do microfone ---------------- */
+const meterBars = [...document.querySelectorAll('#micMeter i')];
+const meterBuf = new Uint8Array(512);
+let meterLevel = 0, meterShown = -1;
+function updateMeter() {
+  const an = state.audio?.analyser;
+  const el = $('#micMeter');
+  const visible = !!(an && state.audio.micNode);
+  el.hidden = !visible;
+  if (!visible) return;
+  an.getByteTimeDomainData(meterBuf);
+  let sum = 0;
+  for (let i = 0; i < meterBuf.length; i++) { const d = (meterBuf[i] - 128) / 128; sum += d * d; }
+  const rms = Math.sqrt(sum / meterBuf.length);
+  const target = clamp(rms * 5, 0, 1);
+  meterLevel = target > meterLevel ? target : meterLevel * 0.9 + target * 0.1;
+  const n = Math.round(meterLevel * meterBars.length);
+  if (n !== meterShown) {
+    meterBars.forEach((b, i) => b.classList.toggle('on', i < n));
+    meterShown = n;
+  }
+  el.classList.toggle('off', state.settings.volMic === 0);
+}
+
+function loop() { draw(); updateMeter(); requestAnimationFrame(loop); }
 
 /* ---------------- câmera / microfone ---------------- */
 async function cameraOn() {
   if (!navigator.mediaDevices?.getUserMedia) {
     toast('Este navegador não permite câmera. Abra pelo link https no Chrome ou Safari.'); return;
   }
+  ensureAudio();
   try {
     const s = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
@@ -347,6 +431,7 @@ async function cameraOn() {
     camVideo.srcObject = state.camStream;
     await camVideo.play().catch(() => {});
     refreshUi();
+    showFrameHint();
   } catch (e) {
     console.error(e);
     toast(e.name === 'NotAllowedError'
@@ -356,7 +441,7 @@ async function cameraOn() {
 }
 
 function cameraOff() {
-  if (state.recorder) { toast('Pare a gravação antes de desligar a câmera.'); return; }
+  if (busy()) { toast('Pare a gravação antes de desligar a câmera.'); return; }
   state.camStream?.getTracks().forEach((t) => t.stop());
   state.camStream = null;
   camVideo.srcObject = null;
@@ -371,10 +456,12 @@ function ensureAudio() {
     const vidSrc = actx.createMediaElementSource(mainVideo);
     const vidGain = actx.createGain();
     const micGain = actx.createGain();
-    vidSrc.connect(actx.destination);   // você ouve o vídeo
-    vidSrc.connect(vidGain).connect(dest); // e ele entra na gravação
-    micGain.connect(dest);              // a voz só vai para a gravação (sem retorno)
-    state.audio = { ctx: actx, dest, vidGain, micGain, micNode: null };
+    const analyser = actx.createAnalyser();
+    analyser.fftSize = 512;
+    vidSrc.connect(actx.destination);        // você ouve o vídeo
+    vidSrc.connect(vidGain).connect(dest);   // e ele entra na gravação
+    micGain.connect(dest);                   // a voz só vai para a gravação (sem retorno)
+    state.audio = { ctx: actx, dest, vidGain, micGain, micNode: null, analyser };
     applyVolumes();
     if (state.micStream) setMic(state.micStream);
   }
@@ -390,6 +477,7 @@ function setMic(stream) {
   if (stream && stream.getAudioTracks().length) {
     state.audio.micNode = state.audio.ctx.createMediaStreamSource(stream);
     state.audio.micNode.connect(state.audio.micGain);
+    state.audio.micNode.connect(state.audio.analyser);
   }
 }
 
@@ -399,10 +487,72 @@ function applyVolumes() {
   state.audio.micGain.gain.value = state.settings.volMic / 100;
 }
 
+/* ---------------- enquadramento do rosto (arrastar / pinçar) ---------------- */
+const ovCam = $('#ovCam');
+const pointers = new Map();
+let gesture = null, lastCamTap = 0, hintShown = false;
+
+function showFrameHint() {
+  if (hintShown) return;
+  hintShown = true;
+  const h = $('#frameHint');
+  h.hidden = false;
+  setTimeout(() => (h.hidden = true), 3500);
+}
+
+function stagePxToLogical() { return W / $('#stage').clientWidth; }
+
+ovCam.addEventListener('pointerdown', (e) => {
+  if (!state.camStream || e.target.closest('button')) return;
+  try { ovCam.setPointerCapture(e.pointerId); } catch {}
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const s = state.settings;
+  if (pointers.size === 1) {
+    const now = Date.now();
+    if (now - lastCamTap < 300) { // dois toques: volta ao normal
+      s.camZoom = 1; s.camX = 0; s.camY = 0; saveSettings(); lastCamTap = 0; gesture = null; return;
+    }
+    lastCamTap = now;
+    gesture = { type: 'pan', x: e.clientX, y: e.clientY, camX: s.camX, camY: s.camY };
+  } else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    gesture = { type: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y), zoom: s.camZoom };
+  }
+});
+ovCam.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId) || !gesture) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const s = state.settings;
+  const r = layout().cam;
+  if (gesture.type === 'pan' && pointers.size === 1) {
+    const k = stagePxToLogical();
+    const { mx, my } = camOverflow(r);
+    if (mx > 0) s.camX = clamp(gesture.camX + ((e.clientX - gesture.x) * k) / mx, -1, 1);
+    if (my > 0) s.camY = clamp(gesture.camY + ((e.clientY - gesture.y) * k) / my, -1, 1);
+  } else if (gesture.type === 'pinch' && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    s.camZoom = clamp(gesture.zoom * (Math.hypot(a.x - b.x, a.y - b.y) / gesture.dist), 1, 3);
+  }
+});
+function endPointer(e) {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (pointers.size === 1) {
+    const [p] = [...pointers.values()];
+    const s = state.settings;
+    gesture = { type: 'pan', x: p.x, y: p.y, camX: s.camX, camY: s.camY };
+  } else if (pointers.size === 0) {
+    gesture = null;
+    saveSettings();
+  }
+}
+ovCam.addEventListener('pointerup', endPointer);
+ovCam.addEventListener('pointercancel', endPointer);
+
 /* ---------------- vídeo principal ---------------- */
 function loadVideo(file) {
   if (!file) return;
-  if (state.recorder) { toast('Pare a gravação antes de trocar o vídeo.'); return; }
+  if (busy()) { toast('Pare a gravação antes de trocar o vídeo.'); return; }
   ensureAudio();
   if (state.videoUrl) URL.revokeObjectURL(state.videoUrl);
   state.videoReady = false;
@@ -418,6 +568,7 @@ mainVideo.addEventListener('loadeddata', () => {
   refreshUi();
 });
 mainVideo.addEventListener('error', () => {
+  if (!mainVideo.src) return;
   state.videoReady = false;
   toast('Não foi possível abrir esse vídeo. Tente outro formato (MP4).');
   refreshUi();
@@ -436,8 +587,32 @@ function togglePlay() {
 }
 function skip(sec) {
   if (!state.videoReady) return;
-  mainVideo.currentTime = Math.max(0, Math.min((mainVideo.duration || 0) - 0.05, mainVideo.currentTime + sec));
+  mainVideo.currentTime = clamp(mainVideo.currentTime + sec, 0, Math.max(0, (mainVideo.duration || 0) - 0.05));
 }
+
+// toque único = play/pausa; dois toques nas laterais = ±10s
+let tapTimer = null, lastVidTap = 0;
+function flash(id) {
+  const el = $(id);
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 450);
+}
+$('#ovVid').addEventListener('click', (e) => {
+  if (e.target.closest('.pill, .mini') || !state.videoReady) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width;
+  const now = Date.now();
+  if (now - lastVidTap < 300) {
+    clearTimeout(tapTimer); lastVidTap = 0;
+    if (x < 0.4) { skip(-10); flash('#flashL'); }
+    else if (x > 0.6) { skip(10); flash('#flashR'); }
+    else togglePlay();
+    return;
+  }
+  lastVidTap = now;
+  tapTimer = setTimeout(togglePlay, 300);
+});
 
 let seeking = false;
 function updateSeek() {
@@ -458,25 +633,31 @@ function refreshPlayIcon() {
 }
 
 /* ---------------- gravação ---------------- */
+// MP4: melhor para postar/editar. WebM: no Chrome é salvo a cada segundo (recuperável).
+// O MP4 do Chrome só entrega o arquivo no final, então não dá para recuperar se o app fechar.
 function pickMime() {
   if (!window.MediaRecorder) return null;
-  const list = [
-    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-    'video/mp4;codecs=avc1,mp4a',
-    'video/mp4',
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
-  ];
+  const mp4 = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a', 'video/mp4'];
+  const webm = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  const list = state.settings.format === 'webm' ? [...webm, ...mp4] : [...mp4, ...webm];
   return list.find((t) => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) ?? '';
 }
 
-async function startRec() {
+function elapsedMs() {
+  return state.recAccum + (state.phase === 'recording' ? performance.now() - state.recSegStart : 0);
+}
+
+function onRecButton() {
+  if (state.phase === 'countdown') return cancelCountdown();
+  if (state.phase === 'idle') return beginRec();
+  if (recActive()) return stopRec();
+}
+
+async function beginRec() {
   if (!state.videoReady) { toast('Carregue um vídeo primeiro.'); return; }
   const mime = pickMime();
   if (mime === null || !canvas.captureStream) { toast('Este navegador não consegue gravar. Use o Chrome (Android) ou o Safari (iPhone) atualizados.'); return; }
-
-  const audio = ensureAudio();
+  ensureAudio();
   if (!state.micStream) {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -485,7 +666,34 @@ async function startRec() {
       toast('Sem microfone: a gravação terá só o som do vídeo.');
     }
   }
+  if (!state.settings.countdown) return startRecNow(mime);
 
+  state.phase = 'countdown';
+  refreshUi();
+  let n = 3;
+  const num = $('#countdownNum');
+  const show = () => { num.textContent = n; num.style.animation = 'none'; void num.offsetWidth; num.style.animation = ''; vibrate(15); };
+  $('#countdown').hidden = false;
+  show();
+  state.countdownT = setInterval(() => {
+    n--;
+    if (n > 0) return show();
+    clearInterval(state.countdownT);
+    $('#countdown').hidden = true;
+    startRecNow(mime);
+  }, 1000);
+}
+
+function cancelCountdown() {
+  clearInterval(state.countdownT);
+  $('#countdown').hidden = true;
+  state.phase = 'idle';
+  refreshUi();
+  toast('Gravação cancelada.');
+}
+
+async function startRecNow(mime) {
+  const audio = ensureAudio();
   const vStream = canvas.captureStream(30);
   const stream = new MediaStream([...vStream.getVideoTracks(), ...audio.dest.stream.getAudioTracks()]);
   const opts = { videoBitsPerSecond: state.settings.quality === '720' ? 5_000_000 : 9_000_000, audioBitsPerSecond: 160_000 };
@@ -493,53 +701,132 @@ async function startRec() {
 
   let rec;
   try { rec = new MediaRecorder(stream, opts); }
-  catch (e) {
-    try { rec = new MediaRecorder(stream); } catch (e2) { console.error(e2); toast('Não foi possível iniciar a gravação.'); return; }
+  catch {
+    try { rec = new MediaRecorder(stream); }
+    catch (e2) { console.error(e2); vStream.getTracks().forEach((t) => t.stop()); state.phase = 'idle'; refreshUi(); toast('Não foi possível iniciar a gravação.'); return; }
   }
-  state.chunks = [];
-  rec.ondataavailable = (e) => { if (e.data && e.data.size) state.chunks.push(e.data); };
-  rec.onstop = () => finishRec(rec, vStream);
+
+  const rid = Date.now().toString(36);
+  state.rec = { rid, created: Date.now(), type: (rec.mimeType || mime || 'video/webm').split(';')[0], marks: [], duration: 0 };
+  state.seq = 0;
+  state.diskWarned = false;
+  state.writeChain = DB.put('kv', { ...state.rec }, 'activeRec').catch(console.error);
+  rec.ondataavailable = (e) => persistChunk(e.data);
+  rec.onstop = () => finishRec();
   rec.onerror = (e) => { console.error(e); toast('Erro durante a gravação.'); };
   rec.start(1000);
+
   state.recorder = rec;
-  state.recStart = performance.now();
+  state.vStream = vStream;
+  state.recAccum = 0;
+  state.recSegStart = performance.now();
+  state.phase = 'recording';
   state.recTimer = setInterval(tickRec, 250);
   tickRec();
+  vibrate(40);
   try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
   refreshUi();
 }
 
-function stopRec() {
-  const rec = state.recorder;
-  if (!rec) return;
-  if (rec.state !== 'inactive') { try { rec.requestData(); } catch {} rec.stop(); }
+function persistChunk(data) {
+  if (!data || !data.size || !state.rec) return;
+  const meta = state.rec;
+  const seq = state.seq++;
+  if (!meta.type && data.type) meta.type = data.type.split(';')[0];
+  const dur = elapsedMs() / 1000;
+  state.writeChain = state.writeChain
+    .then(() => DB.put('chunks', { k: `${meta.rid}:${String(seq).padStart(7, '0')}`, rid: meta.rid, seq, data }))
+    .then(() => { meta.duration = Math.max(meta.duration, dur); return DB.put('kv', { ...meta }, 'activeRec'); })
+    .catch((e) => {
+      console.error(e);
+      if (!state.diskWarned) { state.diskWarned = true; toast('Pouco espaço no celular: a gravação pode não ser salva por completo.', 5000); }
+    });
 }
 
-async function finishRec(rec, vStream) {
-  const duration = (performance.now() - state.recStart) / 1000;
+function togglePauseRec() {
+  const rec = state.recorder;
+  if (!rec) return;
+  if (state.phase === 'recording') {
+    try { rec.pause(); } catch (e) { console.error(e); toast('Este celular não permite pausar a gravação.'); return; }
+    state.recAccum += performance.now() - state.recSegStart;
+    state.phase = 'paused';
+    vibrate(20);
+  } else if (state.phase === 'paused') {
+    rec.resume();
+    state.recSegStart = performance.now();
+    state.phase = 'recording';
+    vibrate(20);
+  }
+  tickRec();
+  refreshUi();
+}
+
+function markMoment() {
+  if (!recActive() || !state.rec) return;
+  const t = elapsedMs() / 1000;
+  state.rec.marks.push(Math.round(t * 10) / 10);
+  DB.put('kv', { ...state.rec }, 'activeRec').catch(console.error);
+  vibrate(25);
+  const b = $('#btnMark');
+  b.classList.add('flash'); setTimeout(() => b.classList.remove('flash'), 400);
+  $('#markCount').textContent = state.rec.marks.length;
+  $('#markCount').hidden = false;
+  toast('Momento marcado · ' + fmt(t), 1300);
+}
+
+function stopRec() {
+  const rec = state.recorder;
+  if (!rec || !state.rec) return;
+  state.rec.duration = elapsedMs() / 1000;
+  state.phase = 'saving';
   clearInterval(state.recTimer);
-  vStream.getTracks().forEach((t) => t.stop());
+  refreshUi();
+  if (rec.state !== 'inactive') rec.stop();
+}
+
+async function finishRec() {
+  const meta = state.rec;
+  state.vStream?.getTracks().forEach((t) => t.stop());
+  state.vStream = null;
+  state.recorder = null;
   state.wakeLock?.release?.().catch(() => {});
   state.wakeLock = null;
-  state.recorder = null;
-  refreshUi();
-
-  const type = (rec.mimeType || state.chunks[0]?.type || 'video/webm').split(';')[0];
-  const blob = new Blob(state.chunks, { type });
-  state.chunks = [];
-  if (!blob.size) { toast('A gravação ficou vazia. Tente de novo.'); return; }
-
-  const thumb = await makeThumb();
-  const item = { id: Date.now().toString(36), created: Date.now(), duration, type, size: blob.size, blob, thumb };
+  vibrate([30, 60, 30]);
   try {
-    await DB.put('videos', item);
+    await state.writeChain;
+    const thumb = await makeThumb();
+    await assembleAndSave(meta, thumb, false);
     toast('Gravação salva em Meus vídeos ✓');
-    renderLibrary();
   } catch (e) {
     console.error(e);
-    toast('Sem espaço para salvar no app. Baixando o arquivo…', 4000);
+    toast('Não foi possível salvar a gravação.', 4000);
+  }
+  state.rec = null;
+  state.phase = 'idle';
+  $('#markCount').hidden = true;
+  refreshUi();
+}
+
+// Junta as partes salvas, cria o vídeo em "Meus vídeos" e apaga as partes.
+async function assembleAndSave(meta, thumb, recovered) {
+  const parts = (await DB.chunks(meta.rid)).sort((a, b) => a.seq - b.seq);
+  if (!parts.length) { await DB.del('kv', 'activeRec'); throw new Error('sem partes'); }
+  const blob = new Blob(parts.map((p) => p.data), { type: meta.type || 'video/webm' });
+  const item = {
+    id: meta.rid, created: meta.created, duration: meta.duration, type: blob.type,
+    size: blob.size, blob, thumb, marks: meta.marks || [], name: recovered ? 'Gravação recuperada' : '',
+  };
+  try {
+    await DB.put('videos', item);
+  } catch (e) {
+    console.error(e);
+    toast('Sem espaço para guardar no app. Baixando o arquivo…', 4000);
     downloadBlob(blob, fileName(item));
   }
+  await DB.delChunks(meta.rid).catch(console.error);
+  await DB.del('kv', 'activeRec').catch(console.error);
+  renderLibrary();
+  return item;
 }
 
 function makeThumb() {
@@ -551,35 +838,80 @@ function makeThumb() {
   });
 }
 
+function thumbFromVideoBlob(blob) {
+  return new Promise((res) => {
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true;
+    const url = URL.createObjectURL(blob);
+    const done = (b) => { URL.revokeObjectURL(url); res(b); };
+    const to = setTimeout(() => done(null), 5000);
+    v.onloadeddata = () => { try { v.currentTime = 0.5; } catch { clearTimeout(to); done(null); } };
+    v.onseeked = () => {
+      const c = document.createElement('canvas'); c.width = 270; c.height = 480;
+      c.getContext('2d').drawImage(v, 0, 0, 270, 480);
+      c.toBlob((b) => { clearTimeout(to); done(b); }, 'image/jpeg', 0.75);
+    };
+    v.onerror = () => { clearTimeout(to); done(null); };
+    v.src = url;
+  });
+}
+
+async function recoverInterrupted() {
+  let meta;
+  try { meta = await DB.get('kv', 'activeRec'); } catch { return; }
+  if (!meta) return;
+  try {
+    const parts = await DB.chunks(meta.rid);
+    if (!parts.length) { await DB.del('kv', 'activeRec'); return; }
+    const preview = new Blob(parts.sort((a, b) => a.seq - b.seq).map((p) => p.data), { type: meta.type || 'video/webm' });
+    const thumb = await thumbFromVideoBlob(preview);
+    await assembleAndSave(meta, thumb, true);
+    toast('Recuperamos uma gravação que foi interrompida. Veja em Meus vídeos.', 5000);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 function tickRec() {
-  const s = (performance.now() - state.recStart) / 1000;
-  const t = fmt(s);
+  const t = fmt(elapsedMs() / 1000);
   $('#recBadgeTime').textContent = t;
-  $('#recHint').textContent = '● ' + t;
 }
 
 /* ---------------- UI geral ---------------- */
 function refreshUi() {
-  const recording = !!state.recorder;
+  const p = state.phase;
   const camOn = !!state.camStream;
+  const active = recActive();
   $('#btnCamOn').hidden = camOn;
-  $('#btnCamOff').hidden = !camOn || recording;
-  $('#ovVid').querySelector('.pill').hidden = state.videoReady || recording;
+  $('#btnCamOff').hidden = !camOn || busy();
+  ovCam.classList.toggle('framing', camOn);
+  $('#btnLoadInStage').hidden = state.videoReady || busy();
+  $('#btnSwapVideo').hidden = !state.videoReady || busy();
 
   for (const id of ['#btnPlay', '#btnBack', '#btnFwd', '#seek']) $(id).disabled = !state.videoReady;
   const rb = $('#btnRec');
-  rb.disabled = !state.videoReady;
-  rb.classList.toggle('on', recording);
-  rb.setAttribute('aria-label', recording ? 'Parar e salvar' : 'Gravar');
-  $('#recBadge').hidden = !recording;
-  $('#btnSwapVideo').hidden = !state.videoReady || recording;
+  rb.disabled = p === 'saving' || (p === 'idle' && !state.videoReady);
+  rb.classList.toggle('on', active || p === 'saving');
+  rb.classList.toggle('cd', p === 'countdown');
+  rb.setAttribute('aria-label', active ? 'Parar e salvar' : p === 'countdown' ? 'Cancelar' : 'Gravar');
+
+  const badge = $('#recBadge');
+  badge.hidden = !(active || p === 'saving');
+  badge.classList.toggle('paused', p === 'paused');
+  $('#recBadgeLabel').textContent = p === 'paused' ? 'Pausado ' : p === 'saving' ? 'Salvando… ' : '';
+
+  $('#recTools').hidden = !active;
+  $('#btnRecPause .i-rp').hidden = p === 'paused';
+  $('#btnRecPause .i-rr').hidden = p !== 'paused';
+  $('#btnRecPause').setAttribute('aria-label', p === 'paused' ? 'Continuar gravação' : 'Pausar gravação');
 
   const hint = $('#recHint');
-  hint.classList.toggle('live', recording);
-  if (!recording) {
-    hint.textContent = !state.videoReady ? 'Carregue um vídeo para gravar'
-      : camOn ? 'Pronto. Toque no REC' : 'Ative a câmera e toque no REC';
-  }
+  hint.hidden = active;
+  hint.textContent = p === 'countdown' ? 'Começando…'
+    : p === 'saving' ? 'Salvando a gravação…'
+    : !state.videoReady ? 'Carregue um vídeo para gravar'
+    : camOn ? 'Pronto. Toque no REC' : 'Ative a câmera e toque no REC';
+
   refreshPlayIcon();
   updateSeek();
 }
@@ -589,8 +921,14 @@ function fileName(item) {
   const d = new Date(item.created);
   const p = (n) => String(n).padStart(2, '0');
   const ext = item.type.includes('mp4') ? 'mp4' : 'webm';
-  return `react-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.${ext}`;
+  const base = item.name ? item.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) : 'react';
+  return `${base || 'react'}-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.${ext}`;
 }
+function dateLabel(ts) {
+  const d = new Date(ts);
+  return d.toLocaleDateString('pt-BR') + ' · ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 const thumbUrls = [];
 async function renderLibrary() {
@@ -606,9 +944,11 @@ async function renderLibrary() {
     b.className = 'card';
     const url = it.thumb ? URL.createObjectURL(it.thumb) : '';
     if (url) thumbUrls.push(url);
-    const d = new Date(it.created);
+    const marks = it.marks?.length || 0;
+    const title = it.name ? esc(it.name) : dateLabel(it.created);
+    const sub = (it.name ? dateLabel(it.created) + ' · ' : '') + fmtBytes(it.size);
     b.innerHTML = `<div class="thumb" style="${url ? `background-image:url('${url}')` : ''}"><span class="dur">${fmt(it.duration)}</span></div>
-      <div class="meta"><b>${d.toLocaleDateString('pt-BR')} · ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</b>${fmtBytes(it.size)}</div>`;
+      <div class="meta"><b>${title}</b>${sub}${marks ? `<br><span class="marks-n">⚑ ${marks} momento${marks > 1 ? 's' : ''}</span>` : ''}</div>`;
     b.onclick = () => openPlayer(it);
     grid.appendChild(b);
   }
@@ -625,10 +965,28 @@ function openPlayer(it) {
   playerUrl = URL.createObjectURL(it.blob);
   const v = $('#playerVideo');
   v.src = playerUrl;
-  const d = new Date(it.created);
-  $('#playerTitle').textContent = d.toLocaleDateString('pt-BR') + ' · ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  $('#playerTitle').textContent = dateLabel(it.created);
+  $('#playerName').value = it.name || '';
   $('#playerMeta').textContent = `${fmt(it.duration)} · ${fmtBytes(it.size)} · ${it.type.includes('mp4') ? 'MP4' : 'WebM'}`;
+  const marks = it.marks || [];
+  $('#playerMarks').hidden = !marks.length;
+  const chips = $('#playerChips');
+  chips.innerHTML = '';
+  marks.forEach((t) => {
+    const c = document.createElement('button');
+    c.textContent = '⚑ ' + fmt(t);
+    c.onclick = () => { v.currentTime = Math.max(0, t - 2); v.play().catch(() => {}); };
+    chips.appendChild(c);
+  });
   openSheet('#playerSheet');
+}
+
+async function saveName() {
+  const it = state.current; if (!it) return;
+  const name = $('#playerName').value.trim();
+  if (name === (it.name || '')) return;
+  it.name = name;
+  try { await DB.put('videos', it); renderLibrary(); } catch (e) { console.error(e); }
 }
 
 function downloadBlob(blob, name) {
@@ -644,7 +1002,7 @@ async function shareCurrent() {
   const file = new File([it.blob], fileName(it), { type: it.type });
   if (navigator.canShare?.({ files: [file] })) {
     try {
-      await navigator.share({ files: [file], title: 'Vídeo React' });
+      await navigator.share({ files: [file], title: it.name || 'Vídeo React' });
     } catch (e) {
       if (e.name !== 'AbortError') { console.error(e); toast('Não deu para compartilhar. Use Baixar arquivo.'); }
     }
@@ -667,7 +1025,7 @@ async function deleteCurrent() {
 function openSheet(sel) { $(sel).hidden = false; }
 function closeSheet(sel) {
   $(sel).hidden = true;
-  if (sel === '#playerSheet') { const v = $('#playerVideo'); v.pause(); }
+  if (sel === '#playerSheet') { $('#playerVideo').pause(); saveName(); }
 }
 document.querySelectorAll('.sheet-backdrop').forEach((bd) => {
   bd.addEventListener('click', (e) => {
@@ -695,30 +1053,48 @@ function bindSeg(id, key, onChange) {
   mark();
   seg.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    if (key === 'quality' && state.recorder) { toast('Mude a qualidade antes de gravar.'); return; }
+    if ((key === 'quality' || key === 'format') && busy()) { toast('Mude isso antes de gravar.'); return; }
     state.settings[key] = b.dataset.v; mark(); onChange?.(); saveSettings();
   });
 }
-function bindToggle(id, key) {
+function bindToggle(id, key, onChange) {
   const el = $(id);
   el.checked = !!state.settings[key];
-  el.addEventListener('change', () => { state.settings[key] = el.checked; saveSettings(); });
+  el.addEventListener('change', () => { state.settings[key] = el.checked; onChange?.(); saveSettings(); });
 }
 
 let bgT;
 const rebuildBgSoon = () => { clearTimeout(bgT); bgT = setTimeout(buildBackground, 60); };
 
+function refreshLayoutFields() {
+  const pip = state.settings.layout === 'pip';
+  $('#fieldSplit').hidden = pip;
+  $('#fieldPip').hidden = !pip;
+  positionOverlays();
+}
+
 function initSettingsUi() {
   bindRange('#sBlur', 'blur', '#vBlur', (v) => (v ? v : 'sem'), rebuildBgSoon);
   bindRange('#sDim', 'dim', '#vDim', (v) => v + '%', rebuildBgSoon);
   bindRange('#sSplit', 'split', '#vSplit', (v) => v + '%', positionOverlays);
+  bindRange('#sPipSize', 'pipSize', '#vPipSize', (v) => v + '%', positionOverlays);
   bindRange('#sVolVid', 'volVid', '#vVolVid', (v) => v + '%', applyVolumes);
   bindRange('#sVolMic', 'volMic', '#vVolMic', (v) => v + '%', applyVolumes);
+  bindSeg('#segLayout', 'layout', refreshLayoutFields);
+  bindSeg('#segCorner', 'pipCorner', positionOverlays);
   bindSeg('#segFit', 'fit');
   bindSeg('#segQuality', 'quality', applyCanvasSize);
+  bindSeg('#segFormat', 'format');
   bindToggle('#sMirror', 'mirror');
-  bindToggle('#sBar', 'showBar');
+  bindToggle('#sBar', 'showBar', positionOverlays);
+  bindToggle('#sCountdown', 'countdown');
+  refreshLayoutFields();
 
+  $('#btnFrameReset').addEventListener('click', () => {
+    Object.assign(state.settings, { camZoom: 1, camX: 0, camY: 0 });
+    saveSettings();
+    toast('Câmera centralizada.');
+  });
   $('#bgInput').addEventListener('change', async (e) => {
     const f = e.target.files?.[0]; e.target.value = '';
     if (!f) return;
@@ -734,7 +1110,7 @@ function initSettingsUi() {
 
 /* ---------------- navegação ---------------- */
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
-  if (state.recorder && t.dataset.view !== 'viewRecord') { toast('Pare a gravação antes de sair desta tela.'); return; }
+  if (busy() && t.dataset.view !== 'viewRecord') { toast('Pare a gravação antes de sair desta tela.'); return; }
   document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('.view').forEach((v) => (v.hidden = v.id !== t.dataset.view));
   if (t.dataset.view === 'viewLibrary') renderLibrary();
@@ -746,16 +1122,19 @@ $('#btnCamOn').addEventListener('click', cameraOn);
 $('#btnCamOff').addEventListener('click', cameraOff);
 $('#fileInput').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
 $('#fileInput2').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
-$('#ovVid').addEventListener('click', (e) => { if (!e.target.closest('.pill, .mini')) togglePlay(); });
 $('#btnPlay').addEventListener('click', togglePlay);
 $('#btnBack').addEventListener('click', () => skip(-10));
 $('#btnFwd').addEventListener('click', () => skip(10));
-$('#btnRec').addEventListener('click', () => (state.recorder ? stopRec() : startRec()));
+$('#btnRec').addEventListener('click', onRecButton);
+$('#btnRecPause').addEventListener('click', togglePauseRec);
+$('#btnMark').addEventListener('click', markMoment);
 $('#btnSettings').addEventListener('click', () => openSheet('#settingsSheet'));
 $('#btnHelp').addEventListener('click', () => openSheet('#helpSheet'));
 $('#pShare').addEventListener('click', shareCurrent);
 $('#pDownload').addEventListener('click', () => state.current && downloadBlob(state.current.blob, fileName(state.current)));
 $('#pDelete').addEventListener('click', deleteCurrent);
+$('#playerName').addEventListener('change', saveName);
+$('#playerName').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
 const seekEl = $('#seek');
 seekEl.addEventListener('input', () => {
@@ -765,10 +1144,10 @@ seekEl.addEventListener('input', () => {
 });
 seekEl.addEventListener('change', () => { seeking = false; });
 
-window.addEventListener('beforeunload', (e) => { if (state.recorder) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', (e) => { if (busy()) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible') {
-    if (state.recorder) {
+    if (recActive()) {
       toast('Você saiu do app durante a gravação: esse trecho pode ter ficado congelado.', 4500);
       try { state.wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
     }
@@ -790,6 +1169,7 @@ new ResizeObserver(fitStage).observe($('#stageWrap'));
   fitStage();
   refreshUi();
   requestAnimationFrame(loop);
+  recoverInterrupted();
   navigator.storage?.persist?.().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(console.error);
