@@ -6,4 +6,4 @@ botões e menus não aparecem no vídeo final. Nada é enviado para servidor.
 
 - Abrir: https://neaguson.github.io/reactpro/
 - Testar localmente: `python -m http.server 8790` nesta pasta e abrir http://localhost:8790
-- Ícones: `python tools/make_icons.py`
+- Ícones (a partir de `assets/logo-mk.svg`, usa o Edge): `pwsh tools/make_icons.ps1`
