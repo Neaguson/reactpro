@@ -409,7 +409,6 @@ function loadVideo(file) {
   state.videoUrl = URL.createObjectURL(file);
   mainVideo.src = state.videoUrl;
   mainVideo.load();
-  $('#uploadText').textContent = file.name || 'Vídeo carregado';
   refreshUi();
 }
 
@@ -573,7 +572,7 @@ function refreshUi() {
   rb.classList.toggle('on', recording);
   rb.setAttribute('aria-label', recording ? 'Parar e salvar' : 'Gravar');
   $('#recBadge').hidden = !recording;
-  $('#uploadLabel').classList.toggle('disabled', recording);
+  $('#btnSwapVideo').hidden = !state.videoReady || recording;
 
   const hint = $('#recHint');
   hint.classList.toggle('live', recording);
@@ -747,7 +746,7 @@ $('#btnCamOn').addEventListener('click', cameraOn);
 $('#btnCamOff').addEventListener('click', cameraOff);
 $('#fileInput').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
 $('#fileInput2').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
-$('#ovVid').addEventListener('click', (e) => { if (!e.target.closest('.pill')) togglePlay(); });
+$('#ovVid').addEventListener('click', (e) => { if (!e.target.closest('.pill, .mini')) togglePlay(); });
 $('#btnPlay').addEventListener('click', togglePlay);
 $('#btnBack').addEventListener('click', () => skip(-10));
 $('#btnFwd').addEventListener('click', () => skip(10));
