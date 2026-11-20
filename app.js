@@ -30,6 +30,7 @@ const DEFAULTS = {
   volVid: 100, volMic: 100, quality: '1080', format: 'mp4', fps: '60',
   watermark: false, wmOpacity: 16, autoClips: false, clipLen: '30',
   pauseVidWithRec: true, headTip: true, duck: true, duckAmt: 50,
+  micNoise: true, micEq: true, micComp: true,
   fx: { ...FX_PRESETS.off },
 };
 
@@ -40,6 +41,8 @@ wmImg.src = 'assets/logo-mk.svg';
 const state = {
   settings: { ...DEFAULTS },
   camStream: null,
+  facing: 'user',       // 'user' (frontal) | 'environment' (traseira)
+  camCount: 0,
   micStream: null,
   videoUrl: null,
   videoReady: false,
@@ -307,10 +310,11 @@ function drawCamera(r) {
   if (!dw) return;
   const src = FX.frame() || camVideo; // com efeitos, desenha a imagem já tratada
   // com espelho, o deslocamento é invertido para acompanhar o dedo na tela
-  const ox = (s.mirror ? -s.camX : s.camX) * mx;
+  const mir = mirrorOn();
+  const ox = (mir ? -s.camX : s.camX) * mx;
   const oy = s.camY * my;
   const dx = r.x + (r.w - dw) / 2 + ox, dy = r.y + (r.h - dh) / 2 + oy;
-  if (s.mirror) {
+  if (mir) {
     ctx.save();
     ctx.translate(2 * (r.x + r.w / 2), 0);
     ctx.scale(-1, 1);
@@ -613,14 +617,12 @@ async function cameraOn() {
   }
   ensureAudio();
   try {
-    const s = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: fps() } },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    const s = await navigator.mediaDevices.getUserMedia({ video: camConstraints(), audio: micConstraints() });
     state.camStream = new MediaStream(s.getVideoTracks());
     setMic(new MediaStream(s.getAudioTracks()));
     camVideo.srcObject = state.camStream;
     await camVideo.play().catch(() => {});
+    countCameras();
     refreshUi();
     showFrameHint();
   } catch (e) {
@@ -633,6 +635,47 @@ async function cameraOn() {
 
 // quadros por segundo escolhidos (câmera e gravação)
 function fps() { return state.settings.fps === '30' ? 30 : 60; }
+function camConstraints() {
+  return { facingMode: { ideal: state.facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: fps() } };
+}
+// Com o "Tirar ruído" ligado, a redução do próprio celular fica desligada para não processar a voz duas vezes.
+function micConstraints() {
+  return { echoCancellation: true, noiseSuppression: !state.settings.micNoise, autoGainControl: true };
+}
+// espelho só faz sentido na câmera frontal
+const mirrorOn = () => state.settings.mirror && state.facing === 'user';
+
+/* Câmera traseira: troca só a imagem; o microfone e a gravação continuam
+   (dá para trocar até no meio da gravação). */
+async function countCameras() {
+  try {
+    const list = await navigator.mediaDevices.enumerateDevices();
+    state.camCount = list.filter((d) => d.kind === 'videoinput').length;
+  } catch { state.camCount = 0; }
+  refreshUi();
+}
+async function switchCamera() {
+  if (!state.camStream || state.switching) return;
+  state.switching = true;
+  const prev = state.facing;
+  state.facing = prev === 'user' ? 'environment' : 'user';
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: camConstraints(), audio: false });
+    state.camStream.getTracks().forEach((t) => t.stop());
+    state.camStream = s;
+    camVideo.srcObject = s;
+    await camVideo.play().catch(() => {});
+    Object.assign(state.settings, { camZoom: 1, camX: 0, camY: 0 });
+    FX.touch();
+    toast(state.facing === 'user' ? 'Câmera frontal' : 'Câmera traseira', 1200);
+  } catch (e) {
+    console.error(e);
+    state.facing = prev;
+    toast('Não foi possível trocar de câmera.');
+  }
+  state.switching = false;
+  refreshUi();
+}
 function applyCamFps() {
   const tr = state.camStream?.getVideoTracks()[0];
   tr?.applyConstraints?.({ frameRate: { ideal: fps() } }).catch(() => {});
@@ -649,25 +692,123 @@ function cameraOff() {
 function ensureAudio() {
   if (!state.audio) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    const actx = new AC();
+    let actx;
+    try { actx = new AC({ sampleRate: 48000 }); } catch { actx = new AC(); } // o RNNoise trabalha em 48 kHz
     const dest = actx.createMediaStreamDestination();
     const vidSrc = actx.createMediaElementSource(mainVideo);
     const duck = actx.createGain();          // abaixa o vídeo enquanto você fala
     const vidGain = actx.createGain();
     const micGain = actx.createGain();
+    const monitor = actx.createGain();       // "Ouvir minha voz" (só no fone, não entra na gravação duas vezes)
+    monitor.gain.value = 0;
     const analyser = actx.createAnalyser();
     analyser.fftSize = 512;
     vidSrc.connect(duck);
     duck.connect(actx.destination);          // você ouve o vídeo
     duck.connect(vidGain).connect(dest);     // e ele entra na gravação
-    micGain.connect(dest);                   // a voz só vai para a gravação (sem retorno)
-    state.audio = { ctx: actx, dest, duck, vidGain, micGain, micNode: null, analyser };
+    micGain.connect(dest);                   // a voz vai para a gravação
+    micGain.connect(monitor).connect(actx.destination); // e, se ligado, para o seu fone
+    state.audio = { ctx: actx, dest, duck, vidGain, micGain, monitor, micNode: null, analyser, chain: buildMicChain(actx) };
     applyVolumes();
     if (state.micStream) setMic(state.micStream);
     setInterval(duckTick, 50);
+    if (state.settings.micNoise) loadRnnoise();
   }
   if (state.audio.ctx.state !== 'running') state.audio.ctx.resume().catch(() => {});
   return state.audio;
+}
+
+/* ---------------- melhorar microfone ----------------
+   Tirar ruído (RNNoise) → equalizador de voz → compressor + limitador.
+   Cada parte liga/desliga sozinha; a cadeia é refeita na hora. */
+function buildMicChain(c) {
+  const bq = (type, f, gain = 0, Q = 0.9) => { const n = c.createBiquadFilter(); n.type = type; n.frequency.value = f; n.gain.value = gain; n.Q.value = Q; return n; };
+  const input = c.createGain();
+  const hp = bq('highpass', 90, 0, 0.7);        // tira ronco, batida e vento
+  const mud = bq('peaking', 320, -2.5, 1);      // menos "abafado"
+  const pres = bq('peaking', 3200, 3.5, 0.9);   // voz mais clara
+  const air = bq('highshelf', 9000, 1.5);       // um pouco de brilho
+  const comp = c.createDynamicsCompressor();     // volume mais parelho
+  comp.threshold.value = -26; comp.knee.value = 8; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.18;
+  const makeup = c.createGain(); makeup.gain.value = 1.8;
+  const limiter = c.createDynamicsCompressor();  // grito/risada não estoura
+  limiter.threshold.value = -2; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.001; limiter.release.value = 0.08;
+  return { input, hp, mud, pres, air, comp, makeup, limiter, rn: null, rnState: 'off' };
+}
+
+function wireMicChain() {
+  const a = state.audio; if (!a) return;
+  const ch = a.chain, s = state.settings;
+  for (const n of [ch.input, ch.rn, ch.hp, ch.mud, ch.pres, ch.air, ch.comp, ch.makeup, ch.limiter]) { try { n?.disconnect(); } catch {} }
+  let last = ch.input;
+  const to = (n) => { last.connect(n); last = n; };
+  if (s.micNoise && ch.rn) to(ch.rn);
+  if (s.micEq) { to(ch.hp); to(ch.mud); to(ch.pres); to(ch.air); }
+  last.connect(a.analyser);                    // medidor, sugestões e "abaixar vídeo" leem a voz já limpa
+  if (s.micComp) { to(ch.comp); to(ch.makeup); to(ch.limiter); }
+  last.connect(a.micGain);
+}
+
+async function loadRnnoise() {
+  const a = state.audio; if (!a) return;
+  const ch = a.chain;
+  if (ch.rn || ch.rnState === 'loading') return;
+  if (a.ctx.sampleRate !== 48000 || !a.ctx.audioWorklet || !window.WebAssembly) {
+    ch.rnState = 'unsupported'; updateMicNote(); return;
+  }
+  ch.rnState = 'loading'; updateMicNote();
+  try {
+    const simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
+    const [, wasmBinary] = await Promise.all([
+      a.ctx.audioWorklet.addModule('assets/vendor/rnnoise/worklet.js'),
+      fetch(simd ? 'assets/vendor/rnnoise/rnnoise_simd.wasm' : 'assets/vendor/rnnoise/rnnoise.wasm').then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); }),
+    ]);
+    ch.rn = new AudioWorkletNode(a.ctx, '@sapphi-red/web-noise-suppressor/rnnoise', { processorOptions: { maxChannels: 2, wasmBinary } });
+    ch.rnState = 'on';
+  } catch (e) {
+    console.error(e);
+    ch.rnState = 'error';
+  }
+  updateMicNote();
+  wireMicChain();
+}
+
+function updateMicNote() {
+  const el = $('#micNoiseNote'); if (!el) return;
+  const st = state.audio?.chain.rnState;
+  el.textContent = !state.settings.micNoise ? 'Desligado: usa só a redução do próprio celular.'
+    : st === 'loading' ? 'Carregando o filtro…'
+    : st === 'unsupported' ? 'Este celular não suporta o filtro; usando a redução do próprio celular.'
+    : st === 'error' ? 'Não foi possível carregar o filtro agora (sem internet?). Tente de novo mais tarde.'
+    : 'Remove ventilador, ar-condicionado, rua e chiado, deixando só a voz.';
+}
+
+function applyMicSettings() {
+  const a = state.audio;
+  if (state.settings.micNoise && a) loadRnnoise();
+  // liga/desliga a redução do próprio celular conforme o RNNoise
+  state.micStream?.getAudioTracks().forEach((t) => t.applyConstraints?.({ noiseSuppression: !state.settings.micNoise }).catch(() => {}));
+  wireMicChain();
+  updateMicNote();
+}
+
+// "Ouvir minha voz": você escuta no fone a voz já com os filtros, ao vivo
+async function ensureMic() {
+  if (state.micStream) return true;
+  try {
+    setMic(await navigator.mediaDevices.getUserMedia({ audio: micConstraints() }));
+    return true;
+  } catch { return false; }
+}
+async function setMonitor(on) {
+  const a = ensureAudio();
+  if (on && !(await ensureMic())) { toast('Libere o microfone para ouvir sua voz.'); on = false; }
+  state.monitoring = on;
+  a.monitor.gain.setTargetAtTime(on ? 1 : 0, a.ctx.currentTime, 0.02);
+  const b = $('#btnMonitor');
+  b.classList.toggle('on', on);
+  b.textContent = on ? 'Parar de ouvir' : '🎧 Ouvir minha voz';
+  if (on) toast('Use fone: sem ele dá microfonia. Ligue e desligue os filtros para comparar.', 3500);
 }
 
 function setMic(stream) {
@@ -677,9 +818,9 @@ function setMic(stream) {
   state.audio.micNode = null;
   if (stream && stream.getAudioTracks().length) {
     state.audio.micNode = state.audio.ctx.createMediaStreamSource(stream);
-    state.audio.micNode.connect(state.audio.micGain);
-    state.audio.micNode.connect(state.audio.analyser);
+    state.audio.micNode.connect(state.audio.chain.input);
   }
+  wireMicChain();
 }
 
 /* Abaixar o vídeo quando você fala: compara o nível do microfone com o
@@ -903,14 +1044,9 @@ async function beginRec() {
   const mime = pickMime();
   if (mime === null || !canvas.captureStream) { toast('Este navegador não consegue gravar. Use o Chrome (Android) ou o Safari (iPhone) atualizados.'); return; }
   ensureAudio();
-  if (!state.micStream) {
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      setMic(s);
-    } catch {
-      toast('Sem microfone: a gravação terá só o som do vídeo.');
-    }
-  }
+  const sp = await spaceInfo();
+  if (sp && sp.minutes < 3 && !confirm(`Pouco espaço no celular: dá para gravar só ${minTxt(sp.minutes)}. A gravação pode parar no meio. Gravar mesmo assim?\n\nDica: em Meus vídeos, apague os que já estão na galeria.`)) return;
+  if (!(await ensureMic())) toast('Sem microfone: a gravação terá só o som do vídeo.');
   if (!state.settings.countdown) {
     if (state.settings.headTip && !state.tipShown) { state.tipShown = true; toast('🎧 Dica: use fone de ouvido para não dar eco.', 3000); }
     return startRecNow(mime);
@@ -1200,6 +1336,7 @@ function refreshUi() {
   $('#btnCamOn').hidden = camOn;
   $('#btnCamOff').hidden = !camOn || busy();
   $('#btnFx').hidden = !camOn;
+  $('#btnFlip').hidden = !camOn || state.camCount === 1; // some se o aparelho só tem uma câmera
   $('#btnFx').classList.toggle('on', FX_KEYS.some((k) => state.settings.fx[k]));
   ovCam.classList.toggle('framing', camOn);
   vidControls.hidden = !state.videoReady;
@@ -1262,15 +1399,39 @@ async function renderLibrary() {
     const marks = (it.marks?.length || 0) + (it.suggestions?.length || 0);
     const title = it.name ? esc(it.name) : dateLabel(it.created);
     const sub = (it.name ? dateLabel(it.created) + ' · ' : '') + fmtBytes(it.size);
-    b.innerHTML = `<div class="thumb" style="${url ? `background-image:url('${url}')` : ''}">${it.clipOf ? '<span class="tag">Corte</span>' : ''}<span class="dur">${fmt(it.duration)}</span></div>
+    b.innerHTML = `<div class="thumb" style="${url ? `background-image:url('${url}')` : ''}">${it.clipOf ? '<span class="tag">Corte</span>' : ''}${it.exported ? '<span class="tag ok">✓ Galeria</span>' : ''}<span class="dur">${fmt(it.duration)}</span></div>
       <div class="meta"><b>${title}</b>${sub}${marks ? `<br><span class="marks-n">⚑ ${marks} momento${marks > 1 ? 's' : ''}</span>` : ''}</div>`;
     b.onclick = () => openPlayer(it);
     grid.appendChild(b);
   }
+  const sp = await spaceInfo();
+  if (sp) {
+    $('#storageInfo').textContent = `${fmtBytes(sp.usage)} usados`;
+    const warn = $('#spaceWarn');
+    warn.hidden = sp.minutes >= LOW_SPACE_MIN;
+    if (!warn.hidden) {
+      const saved = items.filter((i) => i.exported).length;
+      warn.innerHTML = `<b>Pouco espaço no celular:</b> dá para gravar só ${minTxt(sp.minutes)}. `
+        + (saved ? `Apague os vídeos que já estão na galeria (marcados <b>✓ Galeria</b>, ${saved} aqui).` : 'Salve na galeria os vídeos importantes e apague-os daqui para liberar espaço.');
+    }
+  }
+}
+
+/* ---------------- espaço no celular ---------------- */
+const LOW_SPACE_MIN = 10;
+const minTxt = (m) => (m < 1 ? 'menos de 1 min' : `uns ${Math.floor(m)} min`);
+// MB por minuto de gravação, conforme a qualidade escolhida
+function mbPerMin() {
+  const vbr = (state.settings.quality === '720' ? 5 : 9) * (fps() === 60 ? 1.5 : 1);
+  return ((vbr + 0.16) * 60) / 8;
+}
+async function spaceInfo() {
   try {
     const est = await navigator.storage?.estimate?.();
-    if (est?.quota) $('#storageInfo').textContent = `${fmtBytes(est.usage || 0)} de ${fmtBytes(est.quota)}`;
-  } catch {}
+    if (!est?.quota) return null;
+    const free = Math.max(0, est.quota - (est.usage || 0));
+    return { usage: est.usage || 0, free, minutes: free / 1e6 / mbPerMin() };
+  } catch { return null; }
 }
 
 let playerUrl = null;
@@ -1284,8 +1445,81 @@ function openPlayer(it) {
   $('#playerName').value = it.name || '';
   $('#playerMeta').textContent = `${fmt(it.duration)} · ${fmtBytes(it.size)} · ${it.type.includes('mp4') ? 'MP4' : 'WebM'}`;
   renderMoments();
+  resetTrim(it);
   openSheet('#playerSheet');
 }
+
+/* ---------------- corte manual (início e fim) ---------------- */
+const trim = { a: 0, b: 0, previewing: false };
+const trimDur = () => state.current?.duration || 0;
+function resetTrim(it) {
+  const d = it.duration || 0;
+  trim.a = 0; trim.b = Math.min(d, 30); trim.previewing = false;
+  $('#trimBody').hidden = true;
+  $('#btnTrimOpen').classList.remove('open');
+  renderTrim();
+}
+function renderTrim() {
+  const d = trimDur(); if (!d) return;
+  $('#trimA').value = Math.round((trim.a / d) * 1000);
+  $('#trimB').value = Math.round((trim.b / d) * 1000);
+  const f = $('#trimFill');
+  f.style.left = (trim.a / d) * 100 + '%';
+  f.style.width = ((trim.b - trim.a) / d) * 100 + '%';
+  const len = trim.b - trim.a;
+  $('#trimInfo').textContent = `${fmt(trim.a)} – ${fmt(trim.b)} · ${len < 60 ? Math.round(len) + 's' : fmt(len)}`;
+  $('#trimMake').disabled = len < 1;
+}
+function trimHead() {
+  const d = trimDur(), v = $('#playerVideo');
+  if (!d) return;
+  $('#trimHead').style.left = clamp(v.currentTime / d, 0, 1) * 100 + '%';
+  if (trim.previewing && v.currentTime >= trim.b) { v.pause(); trim.previewing = false; }
+}
+$('#playerVideo').addEventListener('timeupdate', trimHead);
+$('#playerVideo').addEventListener('pause', () => { trim.previewing = false; });
+$('#btnTrimOpen').addEventListener('click', () => {
+  const body = $('#trimBody');
+  body.hidden = !body.hidden;
+  $('#btnTrimOpen').classList.toggle('open', !body.hidden);
+  renderTrim(); trimHead();
+});
+$('#trimA').addEventListener('input', (e) => {
+  const d = trimDur();
+  trim.a = clamp((e.target.value / 1000) * d, 0, Math.max(0, trim.b - 1));
+  $('#playerVideo').currentTime = trim.a;
+  renderTrim();
+});
+$('#trimB').addEventListener('input', (e) => {
+  const d = trimDur();
+  trim.b = clamp((e.target.value / 1000) * d, Math.min(d, trim.a + 1), d);
+  $('#playerVideo').currentTime = trim.b;
+  renderTrim();
+});
+$('#trimSetA').addEventListener('click', () => {
+  const d = trimDur(), t = $('#playerVideo').currentTime;
+  trim.a = clamp(t, 0, d);
+  if (trim.b - trim.a < 1) trim.b = Math.min(d, trim.a + 30);
+  if (trim.b - trim.a < 1) trim.a = Math.max(0, trim.b - 1);
+  renderTrim();
+});
+$('#trimSetB').addEventListener('click', () => {
+  const d = trimDur(), t = $('#playerVideo').currentTime;
+  trim.b = clamp(t, 0, d);
+  if (trim.b - trim.a < 1) trim.a = Math.max(0, trim.b - 30);
+  if (trim.b - trim.a < 1) trim.b = Math.min(d, trim.a + 1);
+  renderTrim();
+});
+$('#trimPreview').addEventListener('click', () => {
+  const v = $('#playerVideo');
+  v.currentTime = trim.a;
+  v.play().then(() => { trim.previewing = true; }).catch(() => {});
+});
+$('#trimMake').addEventListener('click', () => {
+  const it = state.current; if (!it) return;
+  queueClip(it, trim.a, { start: trim.a, end: trim.b });
+  toast(`Gerando o corte ${fmt(trim.a)}–${fmt(trim.b)}… ele aparece em Meus vídeos.`, 3500);
+});
 
 /* ---------------- momentos e cortes ---------------- */
 function allMoments(it) {
@@ -1337,9 +1571,9 @@ $('#btnAllClips').addEventListener('click', () => {
 const clipQueue = [];
 let clipBusy = false, clipProgress = 0, clipDoneCount = 0;
 
-function queueClip(item, t) {
+function queueClip(item, t, range) {
   if (isQueued(item, t)) return;
-  clipQueue.push({ item, t });
+  clipQueue.push({ item, t, range });
   updateClipStatus();
   runClips();
 }
@@ -1380,12 +1614,18 @@ async function runClips() {
 
 // Toca o trecho da gravação "por trás", sem som, e grava de novo só aquele pedaço.
 // Leva mais ou menos o tempo do próprio corte.
-async function makeClip({ item, t }) {
+async function makeClip({ item, t, range }) {
   const len = Number(state.settings.clipLen) || 30;
   const total = item.duration || 0;
-  let start = Math.max(0, t - Math.round(len / 3));
-  let end = Math.min(total || start + len, start + len);
-  if (end - start < len && total > len) start = Math.max(0, end - len);
+  let start, end;
+  if (range) { // corte escolhido à mão (início e fim)
+    start = Math.max(0, range.start);
+    end = Math.min(total || range.end, range.end);
+  } else {
+    start = Math.max(0, t - Math.round(len / 3));
+    end = Math.min(total || start + len, start + len);
+    if (end - start < len && total > len) start = Math.max(0, end - len);
+  }
   if (end - start < 1) throw new Error('trecho curto demais');
 
   const v = document.createElement('video');
@@ -1455,11 +1695,13 @@ async function makeClip({ item, t }) {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
       created: Date.now(), duration: end - start, type, size: blob.size, blob, thumb,
       marks: [], suggestions: [], clipsDone: [],
-      name: `Corte ${fmt(t)}${item.name ? ' · ' + item.name : ''}`, clipOf: item.id,
+      name: `Corte ${range ? fmt(start) + '–' + fmt(end) : fmt(t)}${item.name ? ' · ' + item.name : ''}`, clipOf: item.id,
     };
     await DB.put('videos', clip);
-    item.clipsDone = [...(item.clipsDone || []), clipKey(t)];
-    await DB.put('videos', item);
+    if (!range) {
+      item.clipsDone = [...(item.clipsDone || []), clipKey(t)];
+      await DB.put('videos', item);
+    }
   } finally {
     cleanup.reverse().forEach((f) => { try { f(); } catch {} });
   }
@@ -1487,13 +1729,22 @@ async function shareCurrent() {
   if (navigator.canShare?.({ files: [file] })) {
     try {
       await navigator.share({ files: [file], title: it.name || 'Vídeo React' });
+      markExported(it);
     } catch (e) {
       if (e.name !== 'AbortError') { console.error(e); toast('Não deu para compartilhar. Use Baixar arquivo.'); }
     }
   } else {
     downloadBlob(it.blob, fileName(it));
+    markExported(it);
     toast('Baixando… o vídeo vai para a pasta Downloads.');
   }
+}
+
+// marca o vídeo como já salvo fora do app (ajuda a escolher o que apagar quando faltar espaço)
+async function markExported(it) {
+  if (it.exported) return;
+  it.exported = true;
+  try { await DB.put('videos', it); renderLibrary(); } catch (e) { console.error(e); }
 }
 
 async function deleteCurrent() {
@@ -1510,6 +1761,7 @@ function openSheet(sel) { $(sel).hidden = false; }
 function closeSheet(sel) {
   $(sel).hidden = true;
   if (sel === '#playerSheet') { $('#playerVideo').pause(); saveName(); }
+  if (sel === '#settingsSheet' && state.monitoring) setMonitor(false); // não fica se ouvindo sem querer
 }
 document.querySelectorAll('.sheet-backdrop').forEach((bd) => {
   bd.addEventListener('click', (e) => {
@@ -1631,6 +1883,11 @@ function initSettingsUi() {
   bindToggle('#sDuck', 'duck', duckField);
   bindRange('#sDuckAmt', 'duckAmt', '#vDuckAmt', (v) => v + '%');
   duckField();
+  bindToggle('#sMicNoise', 'micNoise', applyMicSettings);
+  bindToggle('#sMicEq', 'micEq', applyMicSettings);
+  bindToggle('#sMicComp', 'micComp', applyMicSettings);
+  updateMicNote();
+  $('#btnMonitor').addEventListener('click', () => setMonitor(!state.monitoring));
   initFxUi();
   bindSeg('#segClipLen', 'clipLen', () => state.current && renderMoments());
   refreshLayoutFields();
@@ -1665,6 +1922,7 @@ document.querySelectorAll('.tab[data-view]').forEach((t) => t.addEventListener('
 /* ---------------- eventos ---------------- */
 $('#btnCamOn').addEventListener('click', cameraOn);
 $('#btnCamOff').addEventListener('click', cameraOff);
+$('#btnFlip').addEventListener('click', switchCamera);
 $('#fileInput').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
 $('#fileInput2').addEventListener('change', (e) => { loadVideo(e.target.files?.[0]); e.target.value = ''; });
 $('#btnPlay').addEventListener('click', togglePlay);
@@ -1676,7 +1934,12 @@ $('#btnMark').addEventListener('click', markMoment);
 $('#btnSettings').addEventListener('click', () => openSheet('#settingsSheet'));
 $('#btnHelp').addEventListener('click', () => openSheet('#helpSheet'));
 $('#pShare').addEventListener('click', shareCurrent);
-$('#pDownload').addEventListener('click', () => state.current && downloadBlob(state.current.blob, fileName(state.current)));
+$('#pPost').addEventListener('click', shareCurrent); // a lista de apps do celular inclui TikTok e Instagram
+$('#pDownload').addEventListener('click', () => {
+  if (!state.current) return;
+  downloadBlob(state.current.blob, fileName(state.current));
+  markExported(state.current);
+});
 $('#pDelete').addEventListener('click', deleteCurrent);
 $('#playerName').addEventListener('change', saveName);
 $('#playerName').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
@@ -1716,6 +1979,9 @@ new ResizeObserver(fitStage).observe($('#stageWrap'));
   requestAnimationFrame(loop);
   recoverInterrupted();
   navigator.storage?.persist?.().catch(() => {});
+  spaceInfo().then((sp) => {
+    if (sp && sp.minutes < LOW_SPACE_MIN) toast(`Pouco espaço no celular: dá para gravar só ${minTxt(sp.minutes)}. Veja em Meus vídeos.`, 5000);
+  });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(console.error);
   }

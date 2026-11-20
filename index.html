@@ -45,6 +45,9 @@
             Ativar câmera
           </button>
           <div class="cam-tools">
+            <button class="mini" id="btnFlip" aria-label="Trocar câmera (frontal/traseira)" hidden>
+              <svg viewBox="0 0 24 24"><path d="M4 8a2 2 0 0 1 2-2h1.5L9 4h6l1.5 2H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M9 12.5a3 3 0 0 1 5.2-2M15 12.5a3 3 0 0 1-5.2 2"/><path d="M14.5 8.8v1.8h-1.8M9.5 16.2v-1.8h1.8"/></svg>
+            </button>
             <button class="mini" id="btnFx" aria-label="Efeitos da câmera">
               <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
             </button>
@@ -106,6 +109,7 @@
     <div class="note">
       <b>Onde ficam salvos?</b> As gravações ficam guardadas dentro do app, neste celular. Para mandar um vídeo para a Galeria/Fotos, abra-o e toque em <b>Salvar na galeria</b>. Se os dados do navegador forem apagados ou o app for desinstalado, as gravações daqui somem, então salve na galeria as que forem importantes.
     </div>
+    <div class="space-warn" id="spaceWarn" hidden></div>
     <div class="clip-status" id="clipStatusL" hidden></div>
     <div class="grid" id="libGrid"></div>
     <div class="empty" id="libEmpty" hidden>
@@ -276,6 +280,22 @@
       <input type="range" id="sDuckAmt" min="20" max="90" step="5">
     </div>
 
+    <h3>Melhorar microfone</h3>
+    <div class="toggle-row">
+      <span>Tirar ruído (RNNoise)<br><span class="muted small" id="micNoiseNote"></span></span>
+      <label class="switch"><input type="checkbox" id="sMicNoise"><i></i></label>
+    </div>
+    <div class="toggle-row">
+      <span>Equalizar a voz<br><span class="muted small">Corta o ronco grave (batidas, vento) e deixa a voz mais clara.</span></span>
+      <label class="switch"><input type="checkbox" id="sMicEq"><i></i></label>
+    </div>
+    <div class="toggle-row">
+      <span>Volume parelho (compressor)<br><span class="muted small">Fala baixa não some e grito ou risada alta não estoura.</span></span>
+      <label class="switch"><input type="checkbox" id="sMicComp"><i></i></label>
+    </div>
+    <button class="btn monitor-btn" id="btnMonitor">🎧 Ouvir minha voz</button>
+    <p class="muted small">Você escuta no fone a sua voz ao vivo, já com os filtros. Ligue e desligue cada um para comparar. Use fone: sem ele dá microfonia. Pode haver um pequeno atraso.</p>
+
     <h3>Qualidade</h3>
     <div class="seg" id="segQuality">
       <button data-v="1080">1080p (melhor)</button>
@@ -364,12 +384,16 @@
       <li><b>Efeitos</b> (botão ✦ no canto da câmera): suavizar pele, clarear olheiras, brilho, contraste, cor e tom. Entram na gravação.</li>
       <li>Os controles do vídeo (play, ±10s, barra de tempo) ficam por cima do vídeo e somem sozinhos enquanto ele toca. Toque no vídeo para mostrá-los de novo.</li>
       <li>A barrinha ao lado do microfone mostra se a sua voz está sendo captada.</li>
+      <li><b>Trocar câmera</b> (botão com setinhas no canto da câmera): alterna entre frontal e traseira. Funciona até no meio da gravação.</li>
+      <li><b>Microfone melhor</b> (Configurações › Melhorar microfone): tira ruído, equaliza a voz e deixa o volume parelho. Use <b>Ouvir minha voz</b> com fone para comparar ao vivo.</li>
     </ul>
     <h3>Cortes</h3>
     <ul class="steps">
       <li>Em <b>Meus vídeos</b>, abra a gravação: cada momento tem o botão <b>Gerar corte</b>. O corte vira um vídeo separado, pronto para postar.</li>
       <li>Cada corte demora mais ou menos o tempo dele para ficar pronto (30s de corte ≈ 30s). Pode continuar usando o app enquanto isso.</li>
       <li>Para cortar sozinho ao terminar de gravar, ligue <b>Cortes automáticos</b> em Configurações.</li>
+      <li><b>Cortar um trecho</b>: na gravação aberta, escolha o início e o fim arrastando as duas bolinhas (ou use "Início aqui" / "Fim aqui") e toque em <b>Gerar corte</b>.</li>
+      <li><b>Postar no TikTok / Instagram</b>: abre a lista de apps do celular; escolha o app e o vídeo vai pronto para postar.</li>
     </ul>
     <h3>O que aparece no vídeo gravado</h3>
     <p>Só o fundo, a câmera, o vídeo e (se ativada) a barra de tempo. Nome do app, botões, menus e toques não aparecem.</p>
@@ -399,10 +423,35 @@
       </div>
       <div class="moment-list" id="playerChips"></div>
       <p class="muted small" id="clipLenInfo"></p>
-      <div class="clip-status" id="clipStatusP" hidden></div>
     </div>
+    <div class="trim">
+      <button class="trim-toggle" id="btnTrimOpen">
+        <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 7.5 20 17M8 16.5 20 7"/></svg>
+        Cortar um trecho (escolher início e fim)
+      </button>
+      <div class="trim-body" id="trimBody" hidden>
+        <div class="dual">
+          <div class="dual-track"><i id="trimFill"></i><b id="trimHead"></b></div>
+          <input type="range" id="trimA" min="0" max="1000" step="1" aria-label="Início do corte">
+          <input type="range" id="trimB" min="0" max="1000" step="1" aria-label="Fim do corte">
+        </div>
+        <div class="trim-row">
+          <button class="btn small-btn" id="trimSetA">Início aqui</button>
+          <span class="trim-info" id="trimInfo"></span>
+          <button class="btn small-btn" id="trimSetB">Fim aqui</button>
+        </div>
+        <div class="trim-row two">
+          <button class="btn" id="trimPreview">▶ Ver trecho</button>
+          <button class="btn gold" id="trimMake">Gerar corte</button>
+        </div>
+        <p class="muted small">Arraste as duas bolinhas, ou toque o vídeo acima e use "Início aqui" / "Fim aqui". O corte leva o mesmo tempo do trecho para ficar pronto e aparece em Meus vídeos.</p>
+      </div>
+    </div>
+    <div class="clip-status" id="clipStatusP" hidden></div>
     <div class="player-actions">
-      <button class="btn gold" id="pShare">Salvar na galeria</button>
+      <button class="btn gold" id="pPost">Postar no TikTok / Instagram</button>
+      <p class="muted small post-hint">Abre a lista de apps do celular: escolha o TikTok ou o Instagram e o vídeo já vai pronto para a tela de postar.</p>
+      <button class="btn" id="pShare">Salvar na galeria</button>
       <button class="btn" id="pDownload">Baixar arquivo</button>
       <button class="btn danger" id="pDelete">Excluir</button>
     </div>
