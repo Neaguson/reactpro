@@ -296,6 +296,7 @@ input[type=range]:disabled { opacity: .35; }
 .lp.pip .c { position: absolute; top: 6px; right: 5px; width: 10px; height: 13px; flex: none; }
 .small-btn { height: 34px; padding: 0 12px; font-size: 13px; flex: none; }
 
+.app-version { margin: 22px 0 4px; text-align: center; font-size: 11px; letter-spacing: .04em; color: rgba(255,255,255,.28); font-variant-numeric: tabular-nums; }
 .btn.monitor-btn { width: 100%; margin-top: 10px; }
 .btn.monitor-btn.on { border-color: var(--gold); color: var(--gold); }
 

@@ -10,6 +10,8 @@
    ========================================================= */
 
 const $ = (s) => document.querySelector(s);
+// Número da versão (aparece discreto no fim das Configurações). Subir junto com o VERSION do sw.js.
+const APP_VERSION = { n: 10, date: '20/11/2026' };
 const W = 1080, H = 1920;            // coordenadas lógicas do quadro (9:16)
 const PAD = 14, GAP = 12, RADIUS = 26;
 
@@ -1979,6 +1981,13 @@ new ResizeObserver(fitStage).observe($('#stageWrap'));
   requestAnimationFrame(loop);
   recoverInterrupted();
   navigator.storage?.persist?.().catch(() => {});
+  // versão: mostra nas Configurações e avisa uma vez quando o app foi atualizado
+  $('#appVersion').textContent = `ReactPro · versão ${APP_VERSION.n} · ${APP_VERSION.date}`;
+  Promise.all([DB.get('kv', 'lastVersion'), DB.get('kv', 'settings')]).then(([last, usedBefore]) => {
+    // sem versão salva mas já usado antes = veio de uma versão antiga, sem número
+    if ((last || usedBefore) && last !== APP_VERSION.n) toast(`App atualizado para a versão ${APP_VERSION.n} ✓`, 3500);
+    if (last !== APP_VERSION.n) DB.put('kv', APP_VERSION.n, 'lastVersion').catch(() => {});
+  }).catch(() => {});
   spaceInfo().then((sp) => {
     if (sp && sp.minutes < LOW_SPACE_MIN) toast(`Pouco espaço no celular: dá para gravar só ${minTxt(sp.minutes)}. Veja em Meus vídeos.`, 5000);
   });

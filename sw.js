@@ -1,5 +1,5 @@
 // Service worker: guarda os arquivos do app para abrir rápido e funcionar sem internet.
-const VERSION = 'reactpro-v9';
+const VERSION = 'reactpro-v10';
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'assets/logo-mk.svg', 'assets/fonts/montserrat.woff2',
   'assets/vendor/rnnoise/worklet.js',
