@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>ReactPro</title>
+<meta name="theme-color" content="#0b0b0c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ReactPro">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="appBg" aria-hidden="true"></div>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" class="brand-mark" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2"/><path d="M13 10.5v11l9-5.5z" fill="currentColor"/></svg>
+      <span>React<b>Pro</b></span>
+    </div>
+    <div class="top-actions">
+      <button class="icon-btn" id="btnSettings" aria-label="Configurações">
+        <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+      <button class="icon-btn" id="btnHelp" aria-label="Ajuda">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M9.5 9.2a2.6 2.6 0 0 1 5 .9c0 1.7-2.5 2.3-2.5 3.9"/><circle cx="12" cy="17.2" r=".6" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============ GRAVAR ============ -->
+  <main class="view" id="viewRecord">
+    <div class="upload-bar">
+      <label class="upload-btn" id="uploadLabel">
+        <input type="file" id="fileInput" accept="video/*" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <span id="uploadText">Carregar vídeo do celular</span>
+      </label>
+    </div>
+
+    <div class="stage-wrap" id="stageWrap">
+      <div class="stage" id="stage">
+        <canvas id="canvas"></canvas>
+        <div class="ov ov-cam" id="ovCam">
+          <button class="pill" id="btnCamOn">
+            <svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+            Ativar câmera
+          </button>
+          <button class="mini" id="btnCamOff" aria-label="Desligar câmera" hidden>
+            <svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M8 6h7.5L17 8h2a2 2 0 0 1 2 2v7M18 19H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/></svg>
+          </button>
+        </div>
+        <div class="ov ov-vid" id="ovVid">
+          <label class="pill" id="btnLoadInStage">
+            <input type="file" id="fileInput2" accept="video/*" hidden>
+            <svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+            Carregar vídeo
+          </label>
+        </div>
+        <div class="rec-badge" id="recBadge" hidden><i></i><span id="recBadgeTime">00:00</span></div>
+      </div>
+    </div>
+
+    <div class="transport">
+      <div class="seek-row">
+        <span class="t" id="tCur">0:00</span>
+        <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled>
+        <span class="t" id="tDur">0:00</span>
+      </div>
+      <div class="ctrl-row">
+        <div class="ctrl-side"><span class="hint" id="recHint">Carregue um vídeo para gravar</span></div>
+        <div class="ctrl-center">
+          <button class="ctl" id="btnBack" aria-label="Voltar 10 segundos" disabled>
+            <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
+          </button>
+          <button class="ctl ctl-main" id="btnPlay" aria-label="Reproduzir" disabled>
+            <svg viewBox="0 0 24 24" class="i-play"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+            <svg viewBox="0 0 24 24" class="i-pause" hidden><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/></svg>
+          </button>
+          <button class="ctl" id="btnFwd" aria-label="Avançar 10 segundos" disabled>
+            <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
+          </button>
+        </div>
+        <div class="ctrl-side right">
+          <button class="rec-btn" id="btnRec" aria-label="Gravar" disabled><i></i></button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ MEUS VÍDEOS ============ -->
+  <main class="view" id="viewLibrary" hidden>
+    <div class="lib-head">
+      <h1>Meus vídeos</h1>
+      <span class="muted" id="storageInfo"></span>
+    </div>
+    <div class="note">
+      <b>Onde ficam salvos?</b> As gravações ficam guardadas dentro do app, neste celular. Para mandar um vídeo para a Galeria/Fotos, abra-o e toque em <b>Salvar na galeria</b>. Se os dados do navegador forem apagados ou o app for desinstalado, as gravações daqui somem, então salve na galeria as que forem importantes.
+    </div>
+    <div class="grid" id="libGrid"></div>
+    <div class="empty" id="libEmpty" hidden>
+      <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
+      <p>Nenhuma gravação ainda.</p>
+      <span class="muted">Na aba Gravar, carregue um vídeo e toque no botão REC.</span>
+    </div>
+  </main>
+
+  <nav class="tabbar">
+    <button class="tab active" data-view="viewRecord">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>
+      <span>Gravar</span>
+    </button>
+    <button class="tab" data-view="viewLibrary">
+      <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
+      <span>Meus vídeos</span>
+    </button>
+  </nav>
+</div>
+
+<!-- hidden media sources -->
+<video id="camVideo" class="src-media" playsinline muted autoplay></video>
+<video id="mainVideo" class="src-media" playsinline preload="auto"></video>
+
+<!-- ============ CONFIGURAÇÕES ============ -->
+<div class="sheet-backdrop" id="settingsSheet" hidden>
+  <section class="sheet" role="dialog" aria-label="Configurações">
+    <div class="sheet-head">
+      <h2>Configurações</h2>
+      <button class="icon-btn" data-close aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+
+    <h3>Fundo</h3>
+    <div class="bg-row">
+      <div class="bg-thumb" id="bgThumb"></div>
+      <div class="bg-actions">
+        <label class="btn">
+          <input type="file" id="bgInput" accept="image/*" hidden>
+          Escolher imagem
+        </label>
+        <button class="btn ghost" id="bgRemove">Remover</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="sBlur">Desfoque <span id="vBlur"></span></label>
+      <input type="range" id="sBlur" min="0" max="40" step="1">
+    </div>
+    <div class="field">
+      <label for="sDim">Escurecer <span id="vDim"></span></label>
+      <input type="range" id="sDim" min="0" max="85" step="1">
+    </div>
+
+    <h3>Layout</h3>
+    <div class="field">
+      <label for="sSplit">Tamanho da câmera <span id="vSplit"></span></label>
+      <input type="range" id="sSplit" min="30" max="60" step="1">
+    </div>
+    <div class="field">
+      <label>Vídeo no quadro</label>
+      <div class="seg" id="segFit">
+        <button data-v="contain">Mostrar inteiro</button>
+        <button data-v="cover">Preencher (corta)</button>
+      </div>
+    </div>
+    <div class="toggle-row">
+      <span>Espelhar câmera</span>
+      <label class="switch"><input type="checkbox" id="sMirror"><i></i></label>
+    </div>
+    <div class="toggle-row">
+      <span>Mostrar barra de tempo do vídeo na gravação</span>
+      <label class="switch"><input type="checkbox" id="sBar"><i></i></label>
+    </div>
+
+    <h3>Áudio da gravação</h3>
+    <div class="field">
+      <label for="sVolVid">Som do vídeo <span id="vVolVid"></span></label>
+      <input type="range" id="sVolVid" min="0" max="150" step="5">
+    </div>
+    <div class="field">
+      <label for="sVolMic">Sua voz <span id="vVolMic"></span></label>
+      <input type="range" id="sVolMic" min="0" max="200" step="5">
+    </div>
+
+    <h3>Qualidade</h3>
+    <div class="seg" id="segQuality">
+      <button data-v="1080">1080p (melhor)</button>
+      <button data-v="720">720p (mais leve)</button>
+    </div>
+    <p class="muted small">Se o celular esquentar ou travar durante a gravação, use 720p.</p>
+  </section>
+</div>
+
+<!-- ============ AJUDA ============ -->
+<div class="sheet-backdrop" id="helpSheet" hidden>
+  <section class="sheet" role="dialog" aria-label="Ajuda">
+    <div class="sheet-head">
+      <h2>Como usar</h2>
+      <button class="icon-btn" data-close aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <ol class="steps">
+      <li>Toque em <b>Ativar câmera</b> e permita câmera e microfone.</li>
+      <li>Toque em <b>Carregar vídeo do celular</b> e escolha o vídeo da galeria.</li>
+      <li>Toque no botão <b>REC</b> (círculo vermelho) para começar a gravar.</li>
+      <li>Dê play, pause, volte ou avance o vídeo e reaja à vontade. Tudo entra na gravação.</li>
+      <li>Toque no <b>REC</b> de novo para terminar. O vídeo vai para <b>Meus vídeos</b>.</li>
+    </ol>
+    <h3>O que aparece no vídeo gravado</h3>
+    <p>Só o fundo, a câmera, o vídeo e (se ativada) a barra de tempo. Nome do app, botões, menus e toques não aparecem.</p>
+    <h3>Dicas</h3>
+    <ul class="steps">
+      <li><b>Use fone de ouvido.</b> Sem fone, o microfone pega o som do alto-falante e dá eco.</li>
+      <li>Não saia do app nem bloqueie a tela enquanto grava: a gravação congela.</li>
+      <li>Para o fundo temático (ex.: GTA), vá em Configurações › Fundo.</li>
+    </ul>
+  </section>
+</div>
+
+<!-- ============ PLAYER ============ -->
+<div class="sheet-backdrop" id="playerSheet" hidden>
+  <section class="sheet player" role="dialog" aria-label="Vídeo gravado">
+    <div class="sheet-head">
+      <h2 id="playerTitle">Gravação</h2>
+      <button class="icon-btn" data-close aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <video id="playerVideo" playsinline controls></video>
+    <p class="muted small" id="playerMeta"></p>
+    <div class="player-actions">
+      <button class="btn gold" id="pShare">Salvar na galeria</button>
+      <button class="btn" id="pDownload">Baixar arquivo</button>
+      <button class="btn danger" id="pDelete">Excluir</button>
+    </div>
+  </section>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
