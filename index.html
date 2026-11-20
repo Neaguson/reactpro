@@ -44,9 +44,14 @@
             <svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
             Ativar câmera
           </button>
-          <button class="mini" id="btnCamOff" aria-label="Desligar câmera" hidden>
-            <svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M8 6h7.5L17 8h2a2 2 0 0 1 2 2v7M18 19H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/></svg>
-          </button>
+          <div class="cam-tools">
+            <button class="mini" id="btnFx" aria-label="Efeitos da câmera">
+              <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+            </button>
+            <button class="mini" id="btnCamOff" aria-label="Desligar câmera" hidden>
+              <svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M8 6h7.5L17 8h2a2 2 0 0 1 2 2v7M18 19H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/></svg>
+            </button>
+          </div>
           <div class="meter" id="micMeter" hidden aria-label="Nível do microfone">
             <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
             <i></i><i></i><i></i><i></i><i></i><i></i>
@@ -65,47 +70,29 @@
           </label>
           <div class="seek-flash left" id="flashL">−10s</div>
           <div class="seek-flash right" id="flashR">+10s</div>
+          <!-- controles do vídeo: ficam por cima do vídeo e somem sozinhos enquanto ele toca (não aparecem na gravação) -->
+          <div class="vid-controls" id="vidControls" hidden>
+            <div class="seek-row">
+              <span class="t" id="tCur">0:00</span>
+              <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled>
+              <span class="t" id="tDur">0:00</span>
+            </div>
+            <div class="ctrl-center">
+              <button class="ctl" id="btnBack" aria-label="Voltar 10 segundos" disabled>
+                <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
+              </button>
+              <button class="ctl ctl-main" id="btnPlay" aria-label="Reproduzir" disabled>
+                <svg viewBox="0 0 24 24" class="i-play"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
+                <svg viewBox="0 0 24 24" class="i-pause" hidden><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/></svg>
+              </button>
+              <button class="ctl" id="btnFwd" aria-label="Avançar 10 segundos" disabled>
+                <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
+              </button>
+            </div>
+          </div>
         </div>
         <div class="rec-badge" id="recBadge" hidden><i></i><span id="recBadgeLabel"></span><span id="recBadgeTime">0:00</span></div>
         <div class="countdown" id="countdown" hidden><span id="countdownNum">3</span><small>toque no REC para cancelar</small></div>
-      </div>
-    </div>
-
-    <div class="transport">
-      <div class="seek-row">
-        <span class="t" id="tCur">0:00</span>
-        <input type="range" id="seek" min="0" max="1000" value="0" step="1" disabled>
-        <span class="t" id="tDur">0:00</span>
-      </div>
-      <div class="ctrl-row">
-        <div class="ctrl-side">
-          <span class="hint" id="recHint">Carregue um vídeo para gravar</span>
-          <div class="rec-tools" id="recTools" hidden>
-            <button class="tool" id="btnRecPause" aria-label="Pausar gravação">
-              <svg viewBox="0 0 24 24" class="i-rp"><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/></svg>
-              <svg viewBox="0 0 24 24" class="i-rr" hidden><circle cx="12" cy="12" r="6.5" fill="#e5484d" stroke="none"/></svg>
-            </button>
-            <button class="tool" id="btnMark" aria-label="Marcar momento">
-              <svg viewBox="0 0 24 24"><path d="M6 21V4h11l-2 4 2 4H6"/></svg>
-              <b id="markCount" hidden>0</b>
-            </button>
-          </div>
-        </div>
-        <div class="ctrl-center">
-          <button class="ctl" id="btnBack" aria-label="Voltar 10 segundos" disabled>
-            <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
-          </button>
-          <button class="ctl ctl-main" id="btnPlay" aria-label="Reproduzir" disabled>
-            <svg viewBox="0 0 24 24" class="i-play"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>
-            <svg viewBox="0 0 24 24" class="i-pause" hidden><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor"/></svg>
-          </button>
-          <button class="ctl" id="btnFwd" aria-label="Avançar 10 segundos" disabled>
-            <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4h-4"/><text x="12" y="15.2" text-anchor="middle" font-size="7" fill="currentColor" stroke="none" font-weight="700">10</text></svg>
-          </button>
-        </div>
-        <div class="ctrl-side right">
-          <button class="rec-btn" id="btnRec" aria-label="Gravar" disabled><i></i></button>
-        </div>
       </div>
     </div>
   </main>
@@ -128,14 +115,28 @@
     </div>
   </main>
 
+  <!-- barra de baixo: [Gravar | Pausar] [REC] [Meus vídeos | Marcar] -->
   <nav class="tabbar">
     <button class="tab active" data-view="viewRecord">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>
       <span>Gravar</span>
     </button>
+    <button class="tab tool-tab" id="btnRecPause" aria-label="Pausar gravação" hidden>
+      <svg viewBox="0 0 24 24" class="i-rp"><rect x="7" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.5" y="5.5" width="3.5" height="13" rx="1" fill="currentColor" stroke="none"/></svg>
+      <svg viewBox="0 0 24 24" class="i-rr" hidden><circle cx="12" cy="12" r="6.5" fill="#e5484d" stroke="none"/></svg>
+      <span id="recPauseLabel">Pausar</span>
+    </button>
+    <div class="tab-center">
+      <button class="rec-btn" id="btnRec" aria-label="Gravar" disabled><i></i></button>
+    </div>
     <button class="tab" data-view="viewLibrary">
       <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
       <span>Meus vídeos</span>
+    </button>
+    <button class="tab tool-tab" id="btnMark" aria-label="Marcar momento" hidden>
+      <svg viewBox="0 0 24 24"><path d="M6 21V4h11l-2 4 2 4H6"/></svg>
+      <span>Marcar</span>
+      <b id="markCount" hidden>0</b>
     </button>
   </nav>
 </div>
@@ -223,8 +224,16 @@
       <label class="switch"><input type="checkbox" id="sCountdown"><i></i></label>
     </div>
     <div class="toggle-row">
-      <span>Marca d'água com o logo<br><span class="muted small">Logo pequeno no canto superior dos vídeos gravados.</span></span>
+      <span>Marca d'água com o logo<br><span class="muted small">Logo quase transparente no canto superior dos vídeos gravados.</span></span>
       <label class="switch"><input type="checkbox" id="sWatermark"><i></i></label>
+    </div>
+    <div class="field">
+      <label for="sWmOpacity">Visibilidade da marca d'água <span id="vWmOpacity"></span></label>
+      <input type="range" id="sWmOpacity" min="5" max="60" step="1">
+    </div>
+    <div class="toggle-row">
+      <span>Efeitos da câmera<br><span class="muted small">Suavizar pele, olheiras, brilho, contraste e cor.</span></span>
+      <button class="btn small-btn" id="btnOpenFx">Ajustar</button>
     </div>
 
     <h3>Cortes</h3>
@@ -258,12 +267,61 @@
     </div>
     <p class="muted small">Se o celular esquentar ou travar durante a gravação, use 720p.</p>
 
+    <h3>Fluidez</h3>
+    <div class="seg" id="segFps">
+      <button data-v="60">60 FPS (mais fluido)</button>
+      <button data-v="30">30 FPS (mais leve)</button>
+    </div>
+    <p class="muted small">60 FPS deixa a câmera e o vídeo mais lisos. Se o celular não aguentar, ele grava no máximo que conseguir; se esquentar, use 30.</p>
+
     <h3>Formato do arquivo</h3>
     <div class="seg" id="segFormat">
       <button data-v="mp4">MP4 (para postar)</button>
       <button data-v="webm">WebM (protege)</button>
     </div>
     <p class="muted small"><b>MP4</b> abre em qualquer editor, galeria e rede social, mas no Android o arquivo só é salvo no final: se o app fechar no meio, a gravação se perde. <b>WebM</b> vai sendo salvo a cada segundo e é recuperado se o app fechar, mas alguns editores e redes sociais não aceitam esse formato.</p>
+  </section>
+</div>
+
+<!-- ============ EFEITOS DA CÂMERA ============ -->
+<div class="sheet-backdrop clear" id="fxSheet" hidden>
+  <section class="sheet fx-sheet" role="dialog" aria-label="Efeitos da câmera">
+    <div class="sheet-head">
+      <h2>Efeitos da câmera</h2>
+      <button class="icon-btn" data-close aria-label="Fechar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="presets" id="fxPresets">
+      <button data-p="off">Sem efeito</button>
+      <button data-p="natural">Natural</button>
+      <button data-p="suave">Suave</button>
+      <button data-p="glow">Glow</button>
+    </div>
+    <div class="field">
+      <label for="fxSmooth">Suavizar pele <span id="vFxSmooth"></span></label>
+      <input type="range" id="fxSmooth" min="0" max="100" step="1">
+    </div>
+    <div class="field">
+      <label for="fxShadow">Clarear olheiras e sombras <span id="vFxShadow"></span></label>
+      <input type="range" id="fxShadow" min="0" max="100" step="1">
+    </div>
+    <div class="field">
+      <label for="fxBright">Brilho <span id="vFxBright"></span></label>
+      <input type="range" id="fxBright" min="-50" max="50" step="1">
+    </div>
+    <div class="field">
+      <label for="fxContrast">Contraste <span id="vFxContrast"></span></label>
+      <input type="range" id="fxContrast" min="-50" max="50" step="1">
+    </div>
+    <div class="field">
+      <label for="fxSat">Cor (saturação) <span id="vFxSat"></span></label>
+      <input type="range" id="fxSat" min="-50" max="50" step="1">
+    </div>
+    <div class="field">
+      <label for="fxWarm">Tom (frio ↔ quente) <span id="vFxWarm"></span></label>
+      <input type="range" id="fxWarm" min="-50" max="50" step="1">
+    </div>
+    <button class="btn compare" id="fxCompare">Segure para ver sem efeito</button>
+    <p class="muted small" id="fxNote">Os efeitos entram na gravação. A câmera continua visível em cima enquanto você ajusta.</p>
   </section>
 </div>
 
@@ -283,10 +341,12 @@
     </ol>
     <h3>Durante a gravação</h3>
     <ul class="steps">
-      <li><b>Pausar gravação</b> (botão à esquerda): para de gravar sem criar outro arquivo. Toque de novo para continuar.</li>
+      <li><b>Pausar gravação</b> (na barra de baixo, à esquerda do REC): para de gravar sem criar outro arquivo. Toque de novo para continuar.</li>
       <li><b>Marcar momento</b> (bandeirinha): toque quando acontecer algo bom. O app também sugere sozinho (✦) os trechos em que a sua voz ficou bem mais alta, como risadas e gritos.</li>
       <li>No vídeo: <b>um toque</b> dá play/pausa; <b>dois toques</b> no lado direito avançam 10s e no esquerdo voltam 10s.</li>
       <li>Na câmera: <b>arraste</b> para posicionar o rosto e use <b>dois dedos</b> para zoom. Dois toques na câmera voltam ao normal.</li>
+      <li><b>Efeitos</b> (botão ✦ no canto da câmera): suavizar pele, clarear olheiras, brilho, contraste, cor e tom. Entram na gravação.</li>
+      <li>Os controles do vídeo (play, ±10s, barra de tempo) ficam por cima do vídeo e somem sozinhos enquanto ele toca. Toque no vídeo para mostrá-los de novo.</li>
       <li>A barrinha ao lado do microfone mostra se a sua voz está sendo captada.</li>
     </ul>
     <h3>Cortes</h3>

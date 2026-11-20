@@ -11,15 +11,25 @@
 
 const $ = (s) => document.querySelector(s);
 const W = 1080, H = 1920;            // coordenadas lógicas do quadro (9:16)
-const PAD = 44, GAP = 28, RADIUS = 34;
+const PAD = 14, GAP = 12, RADIUS = 26;
+
+// efeitos da câmera (0 = sem efeito)
+const FX_KEYS = ['smooth', 'shadow', 'bright', 'contrast', 'sat', 'warm'];
+const FX_PRESETS = {
+  off:     { smooth: 0,  shadow: 0,  bright: 0,  contrast: 0,  sat: 0,   warm: 0 },
+  natural: { smooth: 35, shadow: 30, bright: 4,  contrast: 3,  sat: 4,   warm: 3 },
+  suave:   { smooth: 65, shadow: 50, bright: 8,  contrast: -4, sat: 0,   warm: 6 },
+  glow:    { smooth: 55, shadow: 45, bright: 12, contrast: 8,  sat: 14,  warm: 10 },
+};
 
 const DEFAULTS = {
   blur: 14, dim: 35,
   layout: 'stack', split: 45, pipSize: 38, pipCorner: 'tr',
   fit: 'contain', mirror: true, showBar: true, countdown: true,
   camZoom: 1, camX: 0, camY: 0,
-  volVid: 100, volMic: 100, quality: '1080', format: 'mp4',
-  watermark: false, autoClips: false, clipLen: '30',
+  volVid: 100, volMic: 100, quality: '1080', format: 'mp4', fps: '60',
+  watermark: false, wmOpacity: 16, autoClips: false, clipLen: '30',
+  fx: { ...FX_PRESETS.off },
 };
 
 // logo usado na marca d'água
@@ -136,7 +146,7 @@ function layout() {
   if (s.layout === 'pip') {
     const vid = { x: PAD, y: PAD, w: iw, h: ih };
     const cw = Math.round(W * s.pipSize / 100), ch = Math.round(cw * 4 / 3);
-    const m = PAD + 28;
+    const m = PAD + 24;
     const right = s.pipCorner.includes('r'), bottom = s.pipCorner.includes('b');
     const cam = {
       x: right ? W - m - cw : m,
@@ -294,6 +304,7 @@ function drawCamera(r) {
   const s = state.settings;
   const { dw, dh, mx, my } = camOverflow(r);
   if (!dw) return;
+  const src = FX.frame() || camVideo; // com efeitos, desenha a imagem já tratada
   // com espelho, o deslocamento é invertido para acompanhar o dedo na tela
   const ox = (s.mirror ? -s.camX : s.camX) * mx;
   const oy = s.camY * my;
@@ -302,12 +313,155 @@ function drawCamera(r) {
     ctx.save();
     ctx.translate(2 * (r.x + r.w / 2), 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(camVideo, dx, dy, dw, dh);
+    ctx.drawImage(src, dx, dy, dw, dh);
     ctx.restore();
   } else {
-    ctx.drawImage(camVideo, dx, dy, dw, dh);
+    ctx.drawImage(src, dx, dy, dw, dh);
   }
 }
+
+/* ---------------- efeitos da câmera (WebGL) ----------------
+   Suaviza a pele (filtro que preserva bordas, só onde a cor é de pele),
+   clareia sombras locais do rosto (olheiras) e ajusta brilho, contraste,
+   saturação e temperatura. Se o celular não tiver WebGL, a câmera
+   continua normal, sem efeito. */
+const FX = (() => {
+  const VS = `attribute vec2 p; varying vec2 uv;
+    void main(){ uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
+  const FS = `precision mediump float;
+    uniform sampler2D tex; uniform vec2 px; uniform float rad;
+    uniform float uSmooth, uShadow, uBright, uContrast, uSat, uWarm;
+    varying vec2 uv;
+    float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+    float skin(vec3 c){
+      float y = luma(c);
+      float cb = (c.b - y) * 0.564 + 0.5, cr = (c.r - y) * 0.713 + 0.5;
+      return smoothstep(0.26, 0.32, cb) * (1.0 - smoothstep(0.50, 0.55, cb))
+           * smoothstep(0.50, 0.54, cr) * (1.0 - smoothstep(0.69, 0.74, cr))
+           * smoothstep(0.06, 0.18, y);
+    }
+    void main(){
+      vec3 c = texture2D(tex, uv).rgb;
+      vec3 o = c;
+      if (uSmooth > 0.0 || uShadow > 0.0) {
+        vec3 sum = c; float ws = 1.0; float ls = 0.0;
+        for (int ring = 1; ring <= 3; ring++) {
+          float r = float(ring) * rad;
+          for (int k = 0; k < 8; k++) {
+            float a = float(k) * 0.785398 + float(ring) * 0.392699;
+            vec3 s = texture2D(tex, uv + vec2(cos(a), sin(a)) * r * px).rgb;
+            vec3 d = s - c;
+            float w = exp(-dot(d, d) * 30.0);
+            sum += s * w; ws += w; ls += luma(s);
+          }
+        }
+        vec3 bil = sum / ws;
+        float sk = max(skin(c), skin(bil));
+        o = mix(c, bil, clamp(uSmooth * sk, 0.0, 1.0));
+        float l = luma(o);
+        float dark = max(ls / 24.0 - l, 0.0);
+        o += uShadow * sk * (dark * 1.8 + 0.08 * (1.0 - smoothstep(0.12, 0.65, l)));
+      }
+      o += uBright * 0.22;
+      o = (o - 0.5) * (1.0 + uContrast) + 0.5;
+      o = mix(vec3(luma(o)), o, 1.0 + uSat);
+      o += vec3(0.06, 0.012, -0.06) * uWarm;
+      gl_FragColor = vec4(clamp(o, 0.0, 1.0), 1.0);
+    }`;
+
+  let cv = null, gl = null, prog = null, tex = null, U = {}, failed = false;
+  let fresh = true, lastW = 0, lastH = 0;
+  state.fxBypass = false;
+
+  function init() {
+    if (gl || failed) return !!gl;
+    try {
+      cv = document.createElement('canvas');
+      gl = cv.getContext('webgl', { preserveDrawingBuffer: true, alpha: false, antialias: false, premultipliedAlpha: false });
+      if (!gl) throw new Error('sem webgl');
+      const sh = (type, src) => {
+        const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      };
+      prog = gl.createProgram();
+      gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+      gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      gl.useProgram(prog);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'p');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+        [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+      for (const n of ['tex', 'px', 'rad', 'uSmooth', 'uShadow', 'uBright', 'uContrast', 'uSat', 'uWarm']) U[n] = gl.getUniformLocation(prog, n);
+      cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); gl = null; });
+      cv.addEventListener('webglcontextrestored', () => { gl = null; failed = false; });
+      return true;
+    } catch (e) {
+      console.warn('Efeitos indisponíveis:', e);
+      failed = true; gl = null;
+      return false;
+    }
+  }
+
+  const active = () => {
+    const f = state.settings.fx;
+    return !state.fxBypass && FX_KEYS.some((k) => f[k]);
+  };
+
+  // só reprocessa quando chega um quadro novo da câmera
+  function watchFrames() {
+    if (!camVideo.requestVideoFrameCallback) return;
+    const cb = () => { fresh = true; camVideo.requestVideoFrameCallback(cb); };
+    camVideo.requestVideoFrameCallback(cb);
+  }
+  watchFrames();
+  const hasRvfc = !!camVideo.requestVideoFrameCallback;
+
+  function frame() {
+    if (!active() || !camVideo.videoWidth || !init()) return null;
+    const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
+    const k = Math.min(1, 1280 / Math.max(vw, vh));
+    const w = Math.round(vw * k), h = Math.round(vh * k);
+    if (w !== lastW || h !== lastH) { cv.width = w; cv.height = h; lastW = w; lastH = h; fresh = true; }
+    if (!fresh && hasRvfc && !frame.dirty) return cv;
+    fresh = false; frame.dirty = false;
+    try {
+      const f = state.settings.fx;
+      gl.viewport(0, 0, w, h);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, camVideo);
+      gl.uniform1i(U.tex, 0);
+      gl.uniform2f(U.px, 1 / w, 1 / h);
+      gl.uniform1f(U.rad, Math.max(1.2, (Math.min(w, h) / 720) * 2.4));
+      gl.uniform1f(U.uSmooth, f.smooth / 100);
+      gl.uniform1f(U.uShadow, (f.shadow / 100) * 0.7);
+      gl.uniform1f(U.uBright, f.bright / 100);
+      gl.uniform1f(U.uContrast, (f.contrast / 100) * 0.6);
+      gl.uniform1f(U.uSat, f.sat / 100);
+      gl.uniform1f(U.uWarm, f.warm / 100);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return cv;
+    } catch (e) {
+      console.warn(e);
+      return null;
+    }
+  }
+  frame.dirty = false;
+
+  return {
+    frame,
+    supported: () => init(),
+    touch: () => { frame.dirty = true; },
+  };
+})();
 
 function drawVideo(r) {
   const sw = mainVideo.videoWidth, sh = mainVideo.videoHeight;
@@ -399,17 +553,22 @@ function drawCameraPanel(cam, pip, camOn, tint) {
   roundRectPath(ctx, cam.x, cam.y, cam.w, cam.h, cr); ctx.stroke();
 }
 
-// Marca d'água: logo pequeno no canto superior (o lado livre, se a câmera estiver no canto direito)
+// Marca d'água: logo pequeno e quase transparente no canto superior
+// (o lado livre, se a câmera estiver no canto direito). Sem sombra, para não "saltar" da imagem.
 function drawWatermark() {
   if (!state.settings.watermark || !wmImg.complete || !wmImg.naturalWidth) return;
   const s = state.settings;
-  const h = 104, w = h * (wmImg.naturalWidth / wmImg.naturalHeight);
-  const m = PAD + 26;
-  const left = s.layout === 'pip' && s.pipCorner === 'tr';
-  const x = left ? m : W - m - w, y = m;
+  const h = 84, w = h * (wmImg.naturalWidth / wmImg.naturalHeight);
+  let x, y;
+  if (s.layout === 'pip') {
+    const m = PAD + 22;
+    x = s.pipCorner === 'tr' ? m : W - m - w; y = m;
+  } else { // canto inferior direito da câmera (longe dos botões da tela)
+    const { cam } = layout();
+    x = cam.x + cam.w - 24 - w; y = cam.y + cam.h - 24 - h;
+  }
   ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = 18; ctx.shadowOffsetY = 3;
+  ctx.globalAlpha = clamp(s.wmOpacity, 5, 60) / 100;
   ctx.drawImage(wmImg, x, y, w, h);
   ctx.restore();
 }
@@ -438,7 +597,13 @@ function updateMeter() {
   el.classList.toggle('off', state.settings.volMic === 0);
 }
 
-function loop() { draw(); updateMeter(); requestAnimationFrame(loop); }
+// Fora da aba Gravar (e sem gravar), o quadro não precisa ser redesenhado:
+// sobra fôlego para os cortes saírem mais lisos.
+const viewRecord = $('#viewRecord');
+function loop() {
+  if (!viewRecord.hidden || busy()) { draw(); updateMeter(); }
+  requestAnimationFrame(loop);
+}
 
 /* ---------------- câmera / microfone ---------------- */
 async function cameraOn() {
@@ -448,7 +613,7 @@ async function cameraOn() {
   ensureAudio();
   try {
     const s = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: fps() } },
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     state.camStream = new MediaStream(s.getVideoTracks());
@@ -463,6 +628,13 @@ async function cameraOn() {
       ? 'Permissão negada. Libere câmera e microfone nas configurações do navegador.'
       : 'Não foi possível abrir a câmera.');
   }
+}
+
+// quadros por segundo escolhidos (câmera e gravação)
+function fps() { return state.settings.fps === '30' ? 30 : 60; }
+function applyCamFps() {
+  const tr = state.camStream?.getVideoTracks()[0];
+  tr?.applyConstraints?.({ frameRate: { ideal: fps() } }).catch(() => {});
 }
 
 function cameraOff() {
@@ -623,8 +795,20 @@ function flash(id) {
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), 450);
 }
+// controles por cima do vídeo: somem sozinhos enquanto toca, voltam com um toque
+const vidControls = $('#vidControls');
+let ctrlT;
+function pokeControls() {
+  vidControls.classList.remove('faded');
+  clearTimeout(ctrlT);
+  if (!mainVideo.paused && !mainVideo.ended) ctrlT = setTimeout(() => vidControls.classList.add('faded'), 2600);
+}
+vidControls.addEventListener('pointerdown', pokeControls);
+vidControls.addEventListener('click', (e) => e.stopPropagation());
+
 $('#ovVid').addEventListener('click', (e) => {
   if (e.target.closest('.pill, .mini') || !state.videoReady) return;
+  if (vidControls.classList.contains('faded')) { pokeControls(); return; } // 1º toque só mostra os controles
   const rect = e.currentTarget.getBoundingClientRect();
   const x = (e.clientX - rect.left) / rect.width;
   const now = Date.now();
@@ -655,6 +839,7 @@ function refreshPlayIcon() {
   $('#btnPlay .i-play').hidden = playing;
   $('#btnPlay .i-pause').hidden = !playing;
   $('#btnPlay').setAttribute('aria-label', playing ? 'Pausar' : 'Reproduzir');
+  pokeControls();
 }
 
 /* ---------------- gravação ---------------- */
@@ -673,6 +858,10 @@ function elapsedMs() {
 }
 
 function onRecButton() {
+  if ($('#viewRecord').hidden) { // apertou o REC na aba Meus vídeos: volta para Gravar
+    $('.tab[data-view="viewRecord"]').click();
+    return;
+  }
   if (state.phase === 'countdown') return cancelCountdown();
   if (state.phase === 'idle') return beginRec();
   if (recActive()) return stopRec();
@@ -720,9 +909,12 @@ function cancelCountdown() {
 
 async function startRecNow(mime) {
   const audio = ensureAudio();
-  const vStream = canvas.captureStream(30);
+  const f = fps();
+  const vStream = canvas.captureStream(f);
   const stream = new MediaStream([...vStream.getVideoTracks(), ...audio.dest.stream.getAudioTracks()]);
-  const opts = { videoBitsPerSecond: state.settings.quality === '720' ? 5_000_000 : 9_000_000, audioBitsPerSecond: 160_000 };
+  // 60 FPS precisa de mais dados por segundo para não perder nitidez
+  const vbr = (state.settings.quality === '720' ? 5_000_000 : 9_000_000) * (f === 60 ? 1.5 : 1);
+  const opts = { videoBitsPerSecond: vbr, audioBitsPerSecond: 160_000 };
   if (mime) opts.mimeType = mime;
 
   let rec;
@@ -968,7 +1160,10 @@ function refreshUi() {
   const active = recActive();
   $('#btnCamOn').hidden = camOn;
   $('#btnCamOff').hidden = !camOn || busy();
+  $('#btnFx').hidden = !camOn;
+  $('#btnFx').classList.toggle('on', FX_KEYS.some((k) => state.settings.fx[k]));
   ovCam.classList.toggle('framing', camOn);
+  vidControls.hidden = !state.videoReady;
   $('#btnLoadInStage').hidden = state.videoReady || busy();
   $('#btnSwapVideo').hidden = !state.videoReady || busy();
 
@@ -984,17 +1179,14 @@ function refreshUi() {
   badge.classList.toggle('paused', p === 'paused');
   $('#recBadgeLabel').textContent = p === 'paused' ? 'Pausado ' : p === 'saving' ? 'Salvando… ' : '';
 
-  $('#recTools').hidden = !active;
+  // durante a gravação, a barra de baixo troca as abas por Pausar e Marcar
+  document.querySelectorAll('.tab[data-view]').forEach((t) => (t.hidden = active));
+  $('#btnRecPause').hidden = !active;
+  $('#btnMark').hidden = !active;
   $('#btnRecPause .i-rp').hidden = p === 'paused';
   $('#btnRecPause .i-rr').hidden = p !== 'paused';
+  $('#recPauseLabel').textContent = p === 'paused' ? 'Continuar' : 'Pausar';
   $('#btnRecPause').setAttribute('aria-label', p === 'paused' ? 'Continuar gravação' : 'Pausar gravação');
-
-  const hint = $('#recHint');
-  hint.hidden = active;
-  hint.textContent = p === 'countdown' ? 'Começando…'
-    : p === 'saving' ? 'Salvando a gravação…'
-    : !state.videoReady ? 'Carregue um vídeo para gravar'
-    : camOn ? 'Pronto. Toque no REC' : 'Ative a câmera e toque no REC';
 
   refreshPlayIcon();
   updateSeek();
@@ -1181,11 +1373,11 @@ async function makeClip({ item, t }) {
     c.width = v.videoWidth || 1080; c.height = v.videoHeight || 1920;
     const cx = c.getContext('2d', { alpha: false });
     cx.drawImage(v, 0, 0, c.width, c.height);
-    const vs = c.captureStream(30);
+    const vs = c.captureStream(60); // acompanha a gravação original (até 60 FPS)
     cleanup.push(() => vs.getTracks().forEach((tr) => tr.stop()));
     const stream = new MediaStream([...vs.getVideoTracks(), ...dest.stream.getAudioTracks()]);
     const mime = pickMime();
-    const opts = { videoBitsPerSecond: c.width >= 1080 ? 9_000_000 : 5_000_000, audioBitsPerSecond: 160_000 };
+    const opts = { videoBitsPerSecond: (c.width >= 1080 ? 9_000_000 : 5_000_000) * 1.5, audioBitsPerSecond: 160_000 };
     if (mime) opts.mimeType = mime;
     const rec = new MediaRecorder(stream, opts);
     const parts = [];
@@ -1306,7 +1498,7 @@ function bindSeg(id, key, onChange) {
   mark();
   seg.addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
-    if ((key === 'quality' || key === 'format') && busy()) { toast('Mude isso antes de gravar.'); return; }
+    if ((key === 'quality' || key === 'format' || key === 'fps') && busy()) { toast('Mude isso antes de gravar.'); return; }
     state.settings[key] = b.dataset.v; mark(); onChange?.(); saveSettings();
   });
 }
@@ -1326,6 +1518,55 @@ function refreshLayoutFields() {
   positionOverlays();
 }
 
+// painel de efeitos: ajusta ao vivo, com a câmera visível em cima
+const FX_SLIDERS = { smooth: ['#fxSmooth', '#vFxSmooth'], shadow: ['#fxShadow', '#vFxShadow'], bright: ['#fxBright', '#vFxBright'],
+  contrast: ['#fxContrast', '#vFxContrast'], sat: ['#fxSat', '#vFxSat'], warm: ['#fxWarm', '#vFxWarm'] };
+
+function syncFxUi() {
+  const f = state.settings.fx;
+  for (const [k, [id, lab]] of Object.entries(FX_SLIDERS)) {
+    const el = $(id);
+    el.value = f[k];
+    setRangeFill(el);
+    const v = f[k];
+    $(lab).textContent = k === 'smooth' || k === 'shadow' ? (v ? v + '%' : 'sem') : (v > 0 ? '+' + v : String(v));
+  }
+  const match = Object.entries(FX_PRESETS).find(([, p]) => FX_KEYS.every((k) => p[k] === f[k]));
+  $('#fxPresets').querySelectorAll('button').forEach((b) => b.classList.toggle('on', !!match && b.dataset.p === match[0]));
+  $('#btnFx').classList.toggle('on', FX_KEYS.some((k) => f[k]));
+  FX.touch();
+}
+
+function openFx() {
+  if (!FX.supported()) { toast('Este celular não suporta os efeitos de câmera.'); return; }
+  closeSheet('#settingsSheet');
+  if (!state.camStream) toast('Ative a câmera para ver os efeitos.');
+  syncFxUi();
+  openSheet('#fxSheet');
+}
+
+function initFxUi() {
+  for (const [k, [id]] of Object.entries(FX_SLIDERS)) {
+    $(id).addEventListener('input', (e) => { state.settings.fx[k] = +e.target.value; syncFxUi(); saveSettings(); });
+  }
+  $('#fxPresets').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.settings.fx = { ...FX_PRESETS[b.dataset.p] };
+    syncFxUi(); saveSettings();
+  });
+  const cmp = $('#fxCompare');
+  const hold = (on) => (e) => {
+    if (on) { try { cmp.setPointerCapture(e.pointerId); } catch {} }
+    state.fxBypass = on; cmp.classList.toggle('holding', on); FX.touch();
+  };
+  cmp.addEventListener('pointerdown', hold(true));
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) cmp.addEventListener(ev, hold(false));
+  cmp.addEventListener('contextmenu', (e) => e.preventDefault());
+  $('#btnFx').addEventListener('click', openFx);
+  $('#btnOpenFx').addEventListener('click', openFx);
+  syncFxUi();
+}
+
 function initSettingsUi() {
   bindRange('#sBlur', 'blur', '#vBlur', (v) => (v ? v : 'sem'), rebuildBgSoon);
   bindRange('#sDim', 'dim', '#vDim', (v) => v + '%', rebuildBgSoon);
@@ -1338,11 +1579,14 @@ function initSettingsUi() {
   bindSeg('#segFit', 'fit');
   bindSeg('#segQuality', 'quality', applyCanvasSize);
   bindSeg('#segFormat', 'format');
+  bindSeg('#segFps', 'fps', applyCamFps);
   bindToggle('#sMirror', 'mirror');
   bindToggle('#sBar', 'showBar', positionOverlays);
   bindToggle('#sCountdown', 'countdown');
   bindToggle('#sWatermark', 'watermark');
+  bindRange('#sWmOpacity', 'wmOpacity', '#vWmOpacity', (v) => v + '%');
   bindToggle('#sAutoClips', 'autoClips');
+  initFxUi();
   bindSeg('#segClipLen', 'clipLen', () => state.current && renderMoments());
   refreshLayoutFields();
 
@@ -1365,9 +1609,9 @@ function initSettingsUi() {
 }
 
 /* ---------------- navegação ---------------- */
-document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
+document.querySelectorAll('.tab[data-view]').forEach((t) => t.addEventListener('click', () => {
   if (busy() && t.dataset.view !== 'viewRecord') { toast('Pare a gravação antes de sair desta tela.'); return; }
-  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
+  document.querySelectorAll('.tab[data-view]').forEach((x) => x.classList.toggle('active', x === t));
   document.querySelectorAll('.view').forEach((v) => (v.hidden = v.id !== t.dataset.view));
   if (t.dataset.view === 'viewLibrary') renderLibrary();
   else fitStage();
@@ -1417,7 +1661,7 @@ new ResizeObserver(fitStage).observe($('#stageWrap'));
 (async function init() {
   try {
     const saved = await DB.get('kv', 'settings');
-    if (saved) state.settings = { ...DEFAULTS, ...saved };
+    if (saved) state.settings = { ...DEFAULTS, ...saved, fx: { ...DEFAULTS.fx, ...(saved.fx || {}) } };
   } catch (e) { console.error(e); }
   initSettingsUi();
   applyCanvasSize();
